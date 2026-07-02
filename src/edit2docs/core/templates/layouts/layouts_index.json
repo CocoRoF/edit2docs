@@ -1,0 +1,155 @@
+{
+  "academic_defense": {
+    "summary": "Thesis defense, academic presentations, research progress reports, grant applications.",
+    "keywords": [
+      "Professional",
+      "rigorous",
+      "research-oriented",
+      "clear hierarchy"
+    ]
+  },
+  "ai_ops": {
+    "summary": "Telecom AI operations architecture, IT system overviews, digital transformation proposals, smart infrastructure reports.",
+    "keywords": [
+      "Information-dense",
+      "structured",
+      "modular zoning",
+      "telecom",
+      "enterprise style"
+    ]
+  },
+  "anthropic": {
+    "summary": "AI tech talks, developer conferences, technical training, product launches.",
+    "keywords": [
+      "Tech-forward",
+      "professional",
+      "modern",
+      "conclusion-first"
+    ]
+  },
+  "china_telecom_template": {
+    "summary": "China Telecom related briefings, government-enterprise digital transformation plans, restructuring proposals, internal reports.",
+    "keywords": [
+      "Authoritative",
+      "structured",
+      "restrained",
+      "enterprise-government hybrid"
+    ]
+  },
+  "google_style": {
+    "summary": "Annual work reports, technical sharing, project showcases, data-driven presentations.",
+    "keywords": [
+      "Professional",
+      "modern",
+      "clean and restrained",
+      "data-driven",
+      "generous whitespace"
+    ]
+  },
+  "government_blue": {
+    "summary": "Key project briefings, Five-Year Plan presentations, work summaries, investment promotion, policy interpretation.",
+    "keywords": [
+      "Grand",
+      "tech-forward",
+      "modern",
+      "professional government style"
+    ]
+  },
+  "government_red": {
+    "summary": "Government briefings, policy interpretation, work summaries, project introductions, investment promotion.",
+    "keywords": [
+      "Authoritative",
+      "dignified",
+      "professional",
+      "modern government style"
+    ]
+  },
+  "medical_university": {
+    "summary": "Medical academic reports, case discussions, research presentations, hospital work reports, medical education and training.",
+    "keywords": [
+      "Professional",
+      "rigorous",
+      "life-affirming",
+      "tech-forward",
+      "trustworthy"
+    ]
+  },
+  "pixel_retro": {
+    "summary": "Tech talks, programming tutorials, game introductions, geek-style showcases.",
+    "keywords": [
+      "Retro gaming",
+      "neon cyberpunk",
+      "geek tech",
+      "8-bit style"
+    ]
+  },
+  "psychology_attachment": {
+    "summary": "Psychotherapy training, academic lectures, counseling case analysis, professional sharing.",
+    "keywords": [
+      "Professional",
+      "warm",
+      "healing",
+      "trustworthy"
+    ]
+  },
+  "china_power_construction_standard": {
+    "summary": "Engineering project reports, technical proposal presentations, business negotiations, corporate promotion, annual summaries.",
+    "keywords": [
+      "Professional",
+      "composed",
+      "international",
+      "state-owned enterprise style"
+    ]
+  },
+  "china_power_construction_modern": {
+    "summary": "Major engineering reports, international market promotion, technology achievement showcases, high-end business negotiations.",
+    "keywords": [
+      "Grand narrative",
+      "modern precision",
+      "digital tech",
+      "international vision"
+    ]
+  },
+  "caar_business": {
+    "summary": "Product certification display, evaluation presentations, technology promotion, high-end business reporting.",
+    "keywords": [
+      "Modern tech",
+      "authoritative & professional",
+      "composed & grand"
+    ]
+  },
+  "caar_standard": {
+    "summary": "Product certification display, evaluation presentations, technology promotion, business visits.",
+    "keywords": [
+      "Professional",
+      "authoritative",
+      "trustworthy",
+      "consulting style"
+    ]
+  },
+  "caar_modern": {
+    "summary": "Forward-looking technology showcases, strategic releases, high-end business reporting.",
+    "keywords": [
+      "Futuristic",
+      "tech-forward",
+      "deep & refined"
+    ]
+  },
+  "cmb_bank": {
+    "summary": "Transaction banking product introductions, sales-collection proposal reports, client case analyses, branch training materials.",
+    "keywords": [
+      "Brand-consistent",
+      "structured",
+      "product-focused",
+      "refined finance"
+    ]
+  },
+  "chongqing_university": {
+    "summary": "Academic defense, research reports, teaching presentations, scholarly exchange.",
+    "keywords": [
+      "Academically grounded",
+      "Mountain City charm",
+      "Modern minimalism"
+    ]
+  }
+}

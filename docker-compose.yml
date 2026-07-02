@@ -1,0 +1,81 @@
+# Local-dev infrastructure for edit2docs.
+#
+# Spins up Postgres + Redis + MinIO so the API server, worker, and tests can
+# run against real services without touching cloud accounts. Production
+# deployments swap these for managed services (RDS / ElastiCache / S3).
+#
+# Bring up:    docker compose up -d
+# Logs:        docker compose logs -f api worker
+# Tear down:   docker compose down --volumes
+#
+# Health check:
+#   curl http://localhost:8000/health
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: edit2docs
+      POSTGRES_PASSWORD: edit2docs
+      POSTGRES_DB: edit2docs
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U edit2docs -d edit2docs"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: edit2docs
+      MINIO_ROOT_PASSWORD: edit2docs-local-secret
+    ports:
+      - "127.0.0.1:9000:9000"  # S3 API
+      - "127.0.0.1:9001:9001"  # Web console
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # One-shot init: create the bucket and apply Alembic migrations.
+  # Useful during first-time setup.
+  bootstrap:
+    image: python:3.12-slim
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      EDIT2DOCS_DATABASE_URL: postgresql+asyncpg://edit2docs:edit2docs@postgres:5432/edit2docs
+      EDIT2DOCS_S3_ENDPOINT_URL: http://minio:9000
+      EDIT2DOCS_S3_BUCKET: edit2docs-local
+      EDIT2DOCS_S3_ACCESS_KEY_ID: edit2docs
+      EDIT2DOCS_S3_SECRET_ACCESS_KEY: edit2docs-local-secret
+    working_dir: /workspace
+    volumes:
+      - ./:/workspace:ro
+    command: ["sh", "-c", "echo 'Bootstrap runs the migration + bucket creation. Implemented in M3.2/M3.3.' && sleep 1"]
+    profiles: ["bootstrap"]
+
+volumes:
+  postgres-data:
+  minio-data:

@@ -1,0 +1,214 @@
+"""Stub-LLM tests for generate_document / edit_document + unified facade."""
+
+from __future__ import annotations
+
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import pytest
+
+from edit2docs.documents.docx_engine import docx_from_markdown, docx_outline
+from edit2docs.documents.xlsx_engine import xlsx_from_spec, xlsx_outline
+from edit2docs.llm.anthropic_client import LLMResult, LLMUsage
+from edit2docs.tools.edit_doc import EditDocRequest, edit_document
+from edit2docs.tools.generate_doc import GenerateDocRequest, generate_document
+
+
+@dataclass
+class _ScriptedLLM:
+    outputs: list[str]
+    calls: list[dict] = field(default_factory=list)
+
+    async def complete(self, system_prompt, user_message, **kwargs):
+        self.calls.append({"system": system_prompt, "user": user_message})
+        text = self.outputs[min(len(self.calls) - 1, len(self.outputs) - 1)]
+        return LLMResult(
+            text=text,
+            usage=LLMUsage(input_tokens=1, output_tokens=1),
+            model="stub",
+            stop_reason="end_turn",
+        )
+
+
+def _wire(monkeypatch, module_name: str, llm) -> None:
+    module = sys.modules[module_name]
+    monkeypatch.setattr(module, "AnthropicClient", lambda **kw: llm)
+
+
+DOC_MD = "# 주간 보고\n\n## 진행 사항\n- 스튜디오 배포 완료\n"
+SHEET_YAML = (
+    "sheets:\n"
+    "  - name: \"진척\"\n"
+    "    headers: [\"항목\", \"상태\"]\n"
+    "    rows:\n"
+    "      - [\"배포\", \"완료\"]\n"
+)
+
+
+class TestGenerateDocument:
+    @pytest.mark.asyncio
+    async def test_docx_generation(self, monkeypatch):
+        llm = _ScriptedLLM(outputs=[f"```document\n{DOC_MD}```"])
+        _wire(monkeypatch, "edit2docs.tools.generate_doc", llm)
+        resp = await generate_document(
+            GenerateDocRequest(intent="주간 보고서", fmt="docx",
+                               anthropic_api_key="sk-stub")
+        )
+        texts = [e["text"] for e in docx_outline(resp.content)]
+        assert "주간 보고" in texts and "스튜디오 배포 완료" in texts
+
+    @pytest.mark.asyncio
+    async def test_xlsx_generation_with_repair_retry(self, monkeypatch):
+        llm = _ScriptedLLM(
+            outputs=["말로만 하는 대답 (스펙 블록 없음)", f"```sheet_spec\n{SHEET_YAML}```"]
+        )
+        _wire(monkeypatch, "edit2docs.tools.generate_doc", llm)
+        resp = await generate_document(
+            GenerateDocRequest(intent="진척 시트", fmt="xlsx",
+                               anthropic_api_key="sk-stub")
+        )
+        assert len(llm.calls) == 2
+        assert "REMINDER" in llm.calls[1]["user"]
+        outline = xlsx_outline(resp.content)
+        assert outline["sheets"][0]["name"] == "진척"
+        assert any(w.code == "generate_doc_retried" for w in resp.warnings)
+
+    @pytest.mark.asyncio
+    async def test_double_failure_raises_bilingual(self, monkeypatch):
+        llm = _ScriptedLLM(outputs=["no block", "still no block"])
+        _wire(monkeypatch, "edit2docs.tools.generate_doc", llm)
+        with pytest.raises(ValueError, match="문서 생성에 실패"):
+            await generate_document(
+                GenerateDocRequest(intent="x", fmt="xlsx",
+                                   anthropic_api_key="sk-stub")
+            )
+
+
+class TestEditDocument:
+    @pytest.mark.asyncio
+    async def test_docx_edit_turn(self, monkeypatch):
+        content = docx_from_markdown(DOC_MD)
+        target = next(e for e in docx_outline(content) if "배포 완료" in e["text"])
+        plan = (
+            "```reply\n진행 사항을 갱신합니다.\n```\n"
+            "```edit_plan\noperations:\n"
+            f"  - action: replace\n    para: {target['para']}\n"
+            "    new_text: \"스튜디오 v2 배포 완료\"\n"
+            "  - action: insert_after\n"
+            f"    para: {target['para']}\n"
+            "    markdown: \"- 다음 주: PyPI 발행\"\n"
+            "```"
+        )
+        llm = _ScriptedLLM(outputs=[plan])
+        _wire(monkeypatch, "edit2docs.tools.edit_doc", llm)
+        resp = await edit_document(
+            EditDocRequest(content=content, fmt="docx", instruction="진행사항 갱신",
+                           anthropic_api_key="sk-stub")
+        )
+        assert resp.changed is True
+        assert len(resp.operations) == 2
+        texts = [e["text"] for e in docx_outline(resp.content)]
+        assert any("v2 배포 완료" in t for t in texts)
+        assert any("PyPI 발행" in t for t in texts)
+        # planner saw the paragraph outline
+        assert "# Document outline" in llm.calls[0]["user"]
+
+    @pytest.mark.asyncio
+    async def test_xlsx_edit_turn(self, monkeypatch):
+        content = xlsx_from_spec({"sheets": [{"name": "진척", "headers": ["항목", "상태"],
+                                              "rows": [["배포", "진행중"]]}]})
+        plan = (
+            "```reply\n상태를 갱신합니다.\n```\n"
+            "```edit_plan\noperations:\n"
+            "  - action: set_cell\n    sheet: \"진척\"\n    cell: \"B2\"\n"
+            "    value: \"완료\"\n```"
+        )
+        llm = _ScriptedLLM(outputs=[plan])
+        _wire(monkeypatch, "edit2docs.tools.edit_doc", llm)
+        resp = await edit_document(
+            EditDocRequest(content=content, fmt="xlsx", instruction="배포 상태 완료로",
+                           anthropic_api_key="sk-stub")
+        )
+        assert resp.changed is True
+        assert xlsx_outline(resp.content)["sheets"][0]["sample"][1][1] == "완료"
+
+    @pytest.mark.asyncio
+    async def test_question_only_turn_no_change(self, monkeypatch):
+        content = docx_from_markdown(DOC_MD)
+        llm = _ScriptedLLM(
+            outputs=["```reply\n이 문서는 주간 보고서입니다.\n```\n```edit_plan\noperations: []\n```"]
+        )
+        _wire(monkeypatch, "edit2docs.tools.edit_doc", llm)
+        resp = await edit_document(
+            EditDocRequest(content=content, fmt="docx", instruction="이 문서 뭐야?",
+                           anthropic_api_key="sk-stub")
+        )
+        assert resp.changed is False and resp.content == content
+        assert "주간 보고서" in resp.reply
+
+    @pytest.mark.asyncio
+    async def test_plan_missing_retries_then_admits(self, monkeypatch):
+        content = docx_from_markdown(DOC_MD)
+        llm = _ScriptedLLM(outputs=["고치겠습니다.", "이번에도 계획 없음."])
+        _wire(monkeypatch, "edit2docs.tools.edit_doc", llm)
+        resp = await edit_document(
+            EditDocRequest(content=content, fmt="docx", instruction="다 고쳐줘",
+                           anthropic_api_key="sk-stub")
+        )
+        assert len(llm.calls) == 2
+        assert resp.changed is False
+        assert "적용되지 않았습니다" in resp.reply
+
+
+class TestUnifiedFacade:
+    def test_extension_dispatch_and_deterministic_verbs(self, tmp_path: Path):
+        from edit2docs import analyze_doc, preview_doc, set_doc_text
+
+        docx_path = tmp_path / "r.docx"
+        docx_path.write_bytes(docx_from_markdown(DOC_MD))
+        xlsx_path = tmp_path / "s.xlsx"
+        xlsx_path.write_bytes(
+            xlsx_from_spec({"sheets": [{"name": "S", "headers": ["a"], "rows": [[1]]}]})
+        )
+
+        info = analyze_doc(docx_path)
+        assert info["format"] == "docx"
+        target = next(e for e in info["outline"] if "배포" in e["text"])
+        out = tmp_path / "r2.docx"
+        result = set_doc_text(
+            docx_path,
+            [{"para": target["para"], "new_text": "수정됨", "old_text": target["text"]}],
+            output=out,
+        )
+        assert result.applied == 1
+        assert "수정됨" in preview_doc(out)
+
+        info2 = analyze_doc(xlsx_path)
+        assert info2["format"] == "xlsx"
+        r2 = set_doc_text(xlsx_path, [{"sheet": "S", "cell": "A2", "value": 42}])
+        assert r2.applied == 1
+
+        md_preview = preview_doc(xlsx_path, out_dir=tmp_path / "p")
+        assert Path(md_preview).name == "preview.md"
+
+    def test_unsupported_extension_raises(self, tmp_path: Path):
+        from edit2docs import analyze_doc
+
+        bad = tmp_path / "file.hwp"
+        bad.write_bytes(b"x")
+        with pytest.raises(ValueError, match="Unsupported document format"):
+            analyze_doc(bad)
+
+    def test_agent_tools_dispatch(self, tmp_path: Path):
+        from edit2docs.agent_tools import TOOL_NAMES, run_tool
+
+        assert TOOL_NAMES == [
+            "generate_doc", "edit_doc", "preview_doc", "set_doc_text", "analyze_doc",
+        ]
+        docx_path = tmp_path / "r.docx"
+        docx_path.write_bytes(docx_from_markdown(DOC_MD))
+        info = run_tool("analyze_doc", {"doc": str(docx_path)})
+        assert info["format"] == "docx"
+        res = run_tool("preview_doc", {"doc": str(docx_path), "out_dir": str(tmp_path / "p")})
+        assert res["preview_path"].endswith("preview.md")
