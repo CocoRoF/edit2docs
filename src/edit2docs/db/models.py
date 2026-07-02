@@ -72,6 +72,8 @@ class TenantStatus(str, enum.Enum):
 
 class AssetKind(str, enum.Enum):
     source = "source"
+    docx = "docx"
+    xlsx = "xlsx"
     markdown = "markdown"
     spec_lock = "spec_lock"
     svg = "svg"

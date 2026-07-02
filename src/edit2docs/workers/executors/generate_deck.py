@@ -145,7 +145,7 @@ async def run_generate_deck(ctx: ExecutionContext) -> None:
             deck_mode=deck_mode,  # type: ignore[arg-type]
             model=model,
             anthropic_api_key=anthropic_api_key,
-            fail_on_quality_error=False,
+            fail_on_quality_error=bool(params.get("fail_on_quality_error", False)),
         ),
         on_event=on_event,
     )
@@ -259,7 +259,12 @@ async def _run_generate_document(
         await session.commit()
 
     await emit("strategizing", 0.2)
-    sources_markdown = [convert_to_markdown(r).markdown for r in convert_reqs]
+    import asyncio as _asyncio
+
+    converted = await _asyncio.gather(
+        *(_asyncio.to_thread(convert_to_markdown, r) for r in convert_reqs)
+    )
+    sources_markdown = [c.markdown for c in converted]
     resp = await generate_document(
         GenerateDocRequest(
             intent=params["user_intent"],
@@ -281,7 +286,7 @@ async def _run_generate_document(
         session=session,
         storage=storage,
         tenant=tenant,
-        kind=AssetKind.pptx,
+        kind=AssetKind(fmt),
         content=resp.content,
         original_filename=f"{params.get('output_basename', 'document')}.{fmt}",
         mime_type=_DOC_MIME[fmt],

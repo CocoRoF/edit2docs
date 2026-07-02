@@ -63,10 +63,17 @@ def xlsx_from_spec(spec: dict[str, Any]) -> bytes:
 
     wb = Workbook()
     wb.remove(wb.active)
+    seen_titles: set[str] = set()
     for index, sheet in enumerate(sheets, start=1):
         if not isinstance(sheet, dict):
             raise ValueError(f"sheets[{index - 1}] must be a mapping")
         title = str(sheet.get("name") or f"Sheet{index}")[:31]
+        if title in seen_titles:
+            raise ValueError(
+                f"duplicate sheet name {title!r} (after 31-char truncation). "
+                f"시트 이름 {title!r} 이 중복됩니다."
+            )
+        seen_titles.add(title)
         ws = wb.create_sheet(title=title)
 
         headers = [str(h) for h in (sheet.get("headers") or [])]
@@ -96,7 +103,13 @@ def xlsx_from_spec(spec: dict[str, Any]) -> bytes:
         for col in range(1, column_count + 1):
             letter = get_column_letter(col)
             if col <= len(widths) and widths[col - 1]:
-                ws.column_dimensions[letter].width = float(widths[col - 1])
+                try:
+                    ws.column_dimensions[letter].width = float(widths[col - 1])
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"widths entries must be numbers (got {widths[col - 1]!r}). "
+                        "widths 항목은 숫자여야 합니다."
+                    ) from None
             else:
                 longest = 0
                 for row_cells in ws.iter_rows(min_col=col, max_col=col):
@@ -108,13 +121,19 @@ def xlsx_from_spec(spec: dict[str, Any]) -> bytes:
                         longest = max(longest, width)
                 ws.column_dimensions[letter].width = min(max(longest + 2, 8), 48)
 
+        from openpyxl.utils import column_index_from_string
+
         for letter, fmt in (sheet.get("number_formats") or {}).items():
+            if not re.fullmatch(r"[A-Za-z]{1,3}", str(letter)):
+                raise ValueError(
+                    f"number_formats keys must be column letters (got {letter!r}). "
+                    "number_formats 키는 열 문자(A, B, ...)여야 합니다."
+                )
+            col_idx = column_index_from_string(str(letter).upper())
+            if col_idx > column_count:
+                continue  # format for a column with no data — skip, don't create it
             start = 2 if headers else 1
-            for (cell,) in ws.iter_rows(
-                min_col=ws[f"{letter}1"].column,
-                max_col=ws[f"{letter}1"].column,
-                min_row=start,
-            ):
+            for (cell,) in ws.iter_rows(min_col=col_idx, max_col=col_idx, min_row=start):
                 cell.number_format = str(fmt)
 
     buf = io.BytesIO()
@@ -245,6 +264,13 @@ def _apply_one(wb, edit: XlsxEdit) -> XlsxEditResult:
     if edit.action == "set_cell":
         if not edit.cell or not _CELL_REF.match(edit.cell):
             return XlsxEditResult(edit.action, "invalid", f"bad cell ref {edit.cell!r}")
+        from openpyxl.utils import column_index_from_string
+
+        col_letters = re.match(r"^[A-Za-z]+", edit.cell).group(0)
+        if column_index_from_string(col_letters.upper()) > 16384:
+            return XlsxEditResult(
+                edit.action, "invalid", f"column {col_letters!r} beyond Excel's XFD limit"
+            )
         target = ws[edit.cell.upper()]
         if edit.old_value is not None:
             current = "" if target.value is None else str(target.value)

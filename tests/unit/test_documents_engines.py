@@ -151,3 +151,110 @@ class TestXlsxEngine:
             ],
         )
         assert [r.status for r in results] == ["stale", "not_found", "invalid"]
+
+
+class TestReviewRegressions:
+    """Regressions for the 2026-07-02 full-format review findings."""
+
+    def test_docx_results_follow_input_order(self):
+        # Edits deliberately NOT in ascending-para order; the stale one must
+        # be reported at ITS index, not sorted position.
+        content = docx_from_markdown("첫째\n\n둘째\n\n셋째")
+        _, results = apply_docx_edits(
+            content,
+            [
+                DocxEdit(action="replace", para=2, new_text="x", old_text="틀린값"),
+                DocxEdit(action="replace", para=0, new_text="바뀐 첫째", old_text="첫째"),
+            ],
+        )
+        assert [r.status for r in results] == ["stale", "applied"]
+
+    def test_docx_negative_para_rejected(self):
+        content = docx_from_markdown("하나\n\n둘")
+        _, results = apply_docx_edits(
+            content,
+            [
+                DocxEdit(action="replace", para=-1, new_text="x"),
+                DocxEdit(action="delete", para=-2),
+                DocxEdit(action="insert_after", para=-1, markdown="시작 문단"),
+            ],
+        )
+        assert [r.status for r in results] == ["not_found", "not_found", "applied"]
+
+    def test_docx_hyperlink_paragraph_replace_clears_link_text(self):
+        import io as _io
+
+        from docx import Document as _Doc
+        from docx.oxml.ns import qn as _qn
+        from docx.oxml import OxmlElement as _El
+
+        doc = _Doc()
+        p = doc.add_paragraph()
+        hyperlink = _El("w:hyperlink")
+        run = _El("w:r")
+        text_el = _El("w:t")
+        text_el.text = "옛날링크"
+        run.append(text_el)
+        hyperlink.append(run)
+        p._p.append(hyperlink)
+        buf = _io.BytesIO()
+        doc.save(buf)
+
+        new_content, results = apply_docx_edits(
+            buf.getvalue(), [DocxEdit(action="replace", para=0, new_text="새 텍스트")]
+        )
+        assert results[0].status == "applied"
+        texts = [e["text"] for e in docx_outline(new_content)]
+        assert texts == ["새 텍스트"]  # old link text must NOT survive
+
+    def test_docx_dash_data_rows_survive(self):
+        content = docx_from_markdown("| a | b |\n|---|---|\n| - | - |\n| 1 | 2 |")
+        cells = [e["text"] for e in docx_outline(content) if "table" in e]
+        assert cells.count("-") == 2  # the '| - | - |' DATA row is kept
+
+    def test_docx_insert_after_carries_tables(self):
+        content = docx_from_markdown("문단 하나")
+        new_content, results = apply_docx_edits(
+            content,
+            [DocxEdit(action="insert_after", para=0,
+                      markdown="추가 문단\n\n| h |\n|---|\n| v |")],
+        )
+        assert results[0].status == "applied"
+        outline = docx_outline(new_content)
+        assert any(e.get("table") == 0 and e["text"] == "v" for e in outline)
+
+    def test_docx_to_html_neutralizes_javascript_hrefs(self):
+        from edit2docs.documents.docx_engine import _sanitize_preview_html
+
+        dirty = '<p><a href="javascript:alert(1)">x</a> <a href="https://ok.com">y</a></p>'
+        clean = _sanitize_preview_html(dirty)
+        assert "javascript:" not in clean
+        assert 'href="https://ok.com"' in clean and 'rel="noopener' in clean
+
+    def test_xlsx_duplicate_sheet_names_rejected(self):
+        with pytest.raises(ValueError, match="duplicate|중복"):
+            xlsx_from_spec({"sheets": [
+                {"name": "같음", "headers": ["a"], "rows": [[1]]},
+                {"name": "같음", "headers": ["b"], "rows": [[2]]},
+            ]})
+
+    def test_xlsx_number_formats_validation(self):
+        with pytest.raises(ValueError, match="column letters|열 문자"):
+            xlsx_from_spec({"sheets": [{"name": "S", "headers": ["a"], "rows": [[1]],
+                                        "number_formats": {"1": "#,##0"}}]})
+        # Valid letter beyond data: skipped, no phantom columns.
+        content = xlsx_from_spec({"sheets": [{"name": "S", "headers": ["a"], "rows": [[1]],
+                                              "number_formats": {"Z": "#,##0"}}]})
+        assert xlsx_outline(content)["sheets"][0]["columns"] == 1
+
+    def test_xlsx_widths_must_be_numeric(self):
+        with pytest.raises(ValueError, match="numbers|숫자"):
+            xlsx_from_spec({"sheets": [{"name": "S", "headers": ["a"], "rows": [[1]],
+                                        "widths": ["wide"]}]})
+
+    def test_xlsx_cell_beyond_excel_limit_invalid(self):
+        content = xlsx_from_spec({"sheets": [{"name": "S", "headers": ["a"], "rows": [[1]]}]})
+        _, results = apply_xlsx_edits(
+            content, [XlsxEdit(action="set_cell", sheet="S", cell="ZZZ1", value=1)]
+        )
+        assert results[0].status == "invalid"

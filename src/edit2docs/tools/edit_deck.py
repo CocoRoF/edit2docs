@@ -159,7 +159,7 @@ async def edit_deck(
             # happened (production case: "레이아웃 재구성하겠습니다" + no-op).
             reply = (
                 reply.rstrip()
-                + "\n\n⚠️ 편집 계획 생성에 실패해 변경이 적용되지 않았습니다. "
+                + "\n\n[주의] 편집 계획 생성에 실패해 변경이 적용되지 않았습니다. "
                 "요청을 조금 더 구체적으로 나눠서 다시 보내주세요."
             )
 
@@ -172,7 +172,7 @@ async def edit_deck(
     if truncated is not None and truncated.detail:
         reply = (
             reply.rstrip()
-            + f"\n\nℹ️ 계획된 작업 {truncated.detail['emitted']}개 중 상한에 따라 "
+            + f"\n\n[안내] 계획된 작업 {truncated.detail['emitted']}개 중 상한에 따라 "
             f"앞 {truncated.detail['cap']}개만 이번 턴에 적용합니다. 나머지는 "
             "같은 요청을 한 번 더 보내면 이어서 처리됩니다."
         )

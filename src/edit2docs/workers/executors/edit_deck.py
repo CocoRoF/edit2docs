@@ -131,7 +131,12 @@ async def run_edit_deck(ctx: ExecutionContext) -> None:
         await on_event(
             _StageEvent(stage="planning_edits", progress=0.2, message_key="stages.planning_edits")
         )
-        sources_markdown = [convert_to_markdown(r).markdown for r in convert_reqs]
+        import asyncio as _asyncio
+
+        converted = await _asyncio.gather(
+            *(_asyncio.to_thread(convert_to_markdown, r) for r in convert_reqs)
+        )
+        sources_markdown = [c.markdown for c in converted]
         resp = await edit_document(
             EditDocRequest(
                 content=pptx_bytes,
@@ -176,7 +181,7 @@ async def run_edit_deck(ctx: ExecutionContext) -> None:
             session=session,
             storage=storage,
             tenant=tenant,
-            kind=AssetKind.pptx,
+            kind=AssetKind(fmt),
             content=new_content,
             original_filename=f"{params.get('output_basename', 'document')}.{fmt}",
             mime_type=_MIME[fmt],

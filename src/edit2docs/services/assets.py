@@ -35,6 +35,8 @@ _KIND_DIR = {
     AssetKind.svg: "svg",
     AssetKind.image: "images",
     AssetKind.pptx: "pptx",
+    AssetKind.docx: "docx",
+    AssetKind.xlsx: "xlsx",
     AssetKind.audio: "audio",
     AssetKind.preview: "previews",
 }

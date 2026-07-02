@@ -131,7 +131,18 @@ async def apply_doc_text_edits(
 
     fmt = doc_format_of(asset.original_filename, asset.mime_type) or "pptx"
     storage = get_default_storage()
-    content = await storage.get_bytes(asset.storage_key)
+    try:
+        content = await storage.get_bytes(asset.storage_key)
+    except KeyError:
+        # Presigned uploads register the Asset row before the bytes land.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "ASSET_BYTES_MISSING",
+                "message": "에셋 파일이 아직 업로드되지 않았습니다.",
+                "message_en": "Asset bytes are not uploaded yet.",
+            },
+        )
     try:
         edits = [e.model_dump() for e in body.edits]
         new_content, applied, results = await asyncio.to_thread(
@@ -167,7 +178,7 @@ async def apply_doc_text_edits(
         session=session,
         storage=storage,
         tenant=tenant_row,
-        kind=AssetKind.pptx,
+        kind=AssetKind(fmt),
         content=new_content,
         original_filename=f"{basename}.{fmt}",
         mime_type=_MIME[fmt],
