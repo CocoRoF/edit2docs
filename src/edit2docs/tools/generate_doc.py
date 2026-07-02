@@ -130,7 +130,13 @@ def _render(fmt: str, artifact: str) -> bytes:
         if not artifact.strip():
             raise ValueError("empty document body")
         return docx_from_markdown(artifact)
-    spec = yaml.safe_load(artifact)
+    try:
+        spec = yaml.safe_load(artifact)
+    except yaml.YAMLError as exc:
+        # yaml errors are NOT ValueError subclasses — normalize so the
+        # writer-retry loop catches them (unquoted Korean colons are a
+        # common LLM failure mode).
+        raise ValueError(f"invalid sheet_spec YAML: {exc}") from exc
     if not isinstance(spec, dict):
         raise ValueError("sheet_spec must be a YAML mapping")
     return xlsx_from_spec(spec)

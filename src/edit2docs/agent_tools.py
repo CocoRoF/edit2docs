@@ -178,15 +178,17 @@ async def run_tool_async(
 
     args = dict(tool_input)
     if name == "generate_doc":
+        pages_raw = args.pop("pages", None)
+        pages = tuple(pages_raw) if pages_raw and len(pages_raw) == 2 else (8, 12)
         result = await simple.async_generate_doc(
             args.pop("intent"),
             output=args.pop("output"),
             api_key=api_key,
             sources=args.pop("sources", None),
             template=args.pop("template", None),
-            deck_mode=args.pop("deck_mode", "new"),
-            pages=tuple(args.pop("pages", (8, 12))),  # type: ignore[arg-type]
-            lang=args.pop("lang", "ko-KR"),
+            deck_mode=args.pop("deck_mode", "new") or "new",
+            pages=pages,  # type: ignore[arg-type]
+            lang=args.pop("lang", "ko-KR") or "ko-KR",
         )
         return {
             "path": str(result.path),

@@ -267,3 +267,181 @@ class TestEditJobDispatch:
         assert job["result"]["format"] == "docx"
         assert job["result"]["changed"] is True
         assert job["result"]["doc_asset_id"] != str(asset_id)
+
+
+class TestGenerateJobDocxXlsx:
+    @pytest.mark.asyncio
+    async def test_docx_generate_job_end_to_end(
+        self, client, test_db, test_bus, monkeypatch
+    ):
+        import sys
+        from dataclasses import dataclass, field
+
+        from edit2docs.llm.anthropic_client import LLMResult, LLMUsage
+
+        text = "```document\n# 잡 생성 보고서\n\n- 항목 하나\n```"
+
+        @dataclass
+        class _LLM:
+            calls: list = field(default_factory=list)
+
+            async def complete(self, system_prompt, user_message, **kw):
+                self.calls.append(user_message)
+                return LLMResult(text=text, usage=LLMUsage(input_tokens=1, output_tokens=1),
+                                 model="stub", stop_reason="end_turn")
+
+        import edit2docs.tools.generate_doc  # noqa: F401
+
+        gd = sys.modules["edit2docs.tools.generate_doc"]
+        monkeypatch.setattr(gd, "AnthropicClient", lambda **kw: _LLM())
+
+        import edit2docs.api.routes.jobs as jobs_route
+
+        async def _noop(job_id):
+            return None
+
+        monkeypatch.setattr(jobs_route, "_run_inline", _noop)
+
+        resp = await client.post(
+            "/v1/jobs/generate-deck",
+            json={"user_intent": "주간 보고서", "output_format": "docx",
+                  "output_basename": "weekly"},
+            headers={"X-Anthropic-API-Key": "sk-stub"},
+        )
+        assert resp.status_code == 202, resp.text
+        job_id = uuid.UUID(resp.json()["id"])
+
+        async with test_db() as session:
+            from sqlalchemy import select
+
+            from edit2docs.db.models import Job
+            from edit2docs.workers.executors.generate_deck import run_generate_deck
+            from edit2docs.workers.executors.registry import ExecutionContext
+
+            job_row = (
+                await session.execute(select(Job).where(Job.id == job_id))
+            ).scalar_one()
+            await run_generate_deck(
+                ExecutionContext(session=session, bus=test_bus, job=job_row)
+            )
+
+        job = (await client.get(f"/v1/jobs/{job_id}")).json()
+        assert job["status"] == "done", job
+        assert job["result"]["format"] == "docx"
+        assert "doc_asset_id" in job["result"]
+
+        meta = await client.get(f"/v1/assets/{job['result']['doc_asset_id']}")
+        assert meta.json()["original_filename"] == "weekly.docx"
+
+    @pytest.mark.asyncio
+    async def test_xlsx_generate_job_end_to_end(
+        self, client, test_db, test_bus, test_storage, monkeypatch
+    ):
+        import sys
+        from dataclasses import dataclass, field
+
+        from edit2docs.llm.anthropic_client import LLMResult, LLMUsage
+
+        text = (
+            "```sheet_spec\nsheets:\n  - name: \"진척\"\n"
+            "    headers: [\"항목\", \"상태\"]\n    rows:\n"
+            "      - [\"배포\", \"완료\"]\n```"
+        )
+
+        @dataclass
+        class _LLM:
+            async def complete(self, system_prompt, user_message, **kw):
+                return LLMResult(text=text, usage=LLMUsage(input_tokens=1, output_tokens=1),
+                                 model="stub", stop_reason="end_turn")
+
+        import edit2docs.tools.generate_doc  # noqa: F401
+
+        gd = sys.modules["edit2docs.tools.generate_doc"]
+        monkeypatch.setattr(gd, "AnthropicClient", lambda **kw: _LLM())
+
+        import edit2docs.api.routes.jobs as jobs_route
+
+        async def _noop(job_id):
+            return None
+
+        monkeypatch.setattr(jobs_route, "_run_inline", _noop)
+
+        resp = await client.post(
+            "/v1/jobs/generate-deck",
+            json={"user_intent": "진척 시트", "output_format": "xlsx"},
+            headers={"X-Anthropic-API-Key": "sk-stub"},
+        )
+        job_id = uuid.UUID(resp.json()["id"])
+
+        async with test_db() as session:
+            from sqlalchemy import select
+
+            from edit2docs.db.models import Job
+            from edit2docs.workers.executors.generate_deck import run_generate_deck
+            from edit2docs.workers.executors.registry import ExecutionContext
+
+            job_row = (
+                await session.execute(select(Job).where(Job.id == job_id))
+            ).scalar_one()
+            await run_generate_deck(
+                ExecutionContext(session=session, bus=test_bus, job=job_row)
+            )
+
+        job = (await client.get(f"/v1/jobs/{job_id}")).json()
+        assert job["status"] == "done", job
+        assert job["result"]["format"] == "xlsx"
+
+        from edit2docs.documents.xlsx_engine import xlsx_outline
+
+        meta = (await client.get(f"/v1/assets/{job['result']['doc_asset_id']}")).json()
+        raw = await test_storage.get_bytes(meta["storage_key"])
+        assert xlsx_outline(raw)["sheets"][0]["name"] == "진척"
+
+
+class TestTemplateFormatGuard:
+    @pytest.mark.asyncio
+    async def test_template_with_docx_output_rejected(self, client):
+        resp = await client.post(
+            "/v1/jobs/generate-deck",
+            json={
+                "user_intent": "x",
+                "output_format": "docx",
+                "template_asset_id": str(uuid.uuid4()),
+            },
+            headers={"X-Anthropic-API-Key": "k"},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "TEMPLATE_UNSUPPORTED_FOR_FORMAT"
+
+    @pytest.mark.asyncio
+    async def test_deck_mode_with_xlsx_output_rejected(self, client):
+        resp = await client.post(
+            "/v1/jobs/generate-deck",
+            json={
+                "user_intent": "x",
+                "output_format": "xlsx",
+                "deck_mode": "template_extend",
+            },
+            headers={"X-Anthropic-API-Key": "k"},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "TEMPLATE_UNSUPPORTED_FOR_FORMAT"
+
+
+class TestAssetKindByFormat:
+    @pytest.mark.asyncio
+    async def test_docx_revision_has_docx_kind(self, client):
+        asset_id = await _upload(client, DOCX, "report.docx")
+        target = next(e for e in docx_outline(DOCX) if "첫 문단" in e["text"])
+        resp = await client.post(
+            "/v1/text-edits",
+            json={
+                "pptx_asset_id": asset_id,
+                "edits": [
+                    {"action": "replace", "para": target["para"], "new_text": "수정"}
+                ],
+            },
+        )
+        body = resp.json()
+        meta = (await client.get(f"/v1/assets/{body['doc_asset_id']}")).json()
+        assert meta["kind"] == "docx"

@@ -191,6 +191,24 @@ async def enqueue_generate_deck(
             },
         )
 
+    if body.output_format != "pptx" and (
+        body.template_asset_id is not None or body.deck_mode != "new"
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "TEMPLATE_UNSUPPORTED_FOR_FORMAT",
+                "message": (
+                    f"템플릿/deck_mode는 pptx 출력에서만 지원됩니다 "
+                    f"(output_format={body.output_format})."
+                ),
+                "message_en": (
+                    "template_asset_id / deck_mode are pptx-only options "
+                    f"(output_format={body.output_format})."
+                ),
+            },
+        )
+
     deck_mode = body.deck_mode
     if deck_mode not in ("new", "template_restyle", "template_extend"):
         raise HTTPException(
@@ -463,13 +481,18 @@ async def stream_job_events(
                     async for msg in subscriber.listen():  # pragma: no cover - prod path
                         if msg["type"] != "message":
                             continue
-                        envelope = JobEventEnvelope(
-                            job_id=job_id,
-                            type=msg["data"]["type"],
-                            payload=msg["data"]["payload"],
-                            created_at=msg["data"]["created_at"],
-                        )
-                        yield _sse_payload(envelope)
+                        # publish() sends json.dumps(envelope.to_jsonable());
+                        # with decode_responses=True this arrives as a STRING.
+                        data = msg["data"]
+                        if isinstance(data, (bytes, str)):
+                            data = json.loads(data)
+                        yield {
+                            "event": data.get("type", "progress"),
+                            "data": json.dumps(data, ensure_ascii=False),
+                        }
+                        stage = (data.get("payload") or {}).get("stage")
+                        if stage in ("done", "failed"):
+                            return
         else:  # pragma: no cover
             return
 

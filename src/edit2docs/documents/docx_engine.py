@@ -70,7 +70,16 @@ def _split_table_row(line: str) -> list[str]:
     return [cell.strip() for cell in line.strip().strip("|").split("|")]
 
 
-_SEPARATOR_ROW = re.compile(r"^\s*\|?[\s:|-]+\|?\s*$")
+def _is_separator_row(line: str) -> bool:
+    """True only for genuine markdown alignment rows (---, :---:, ...).
+
+    A permissive character-class match also swallowed real data rows like
+    ``| - | - |`` — require every cell to be ``:?-{2,}:?``.
+    """
+    cells = _split_table_row(line)
+    return bool(cells) and all(
+        re.fullmatch(r":?-{2,}:?", cell) for cell in cells
+    )
 
 
 def docx_from_markdown(markdown: str, *, base_font: str = "맑은 고딕") -> bytes:
@@ -114,7 +123,7 @@ def docx_from_markdown(markdown: str, *, base_font: str = "맑은 고딕") -> by
         if _is_table_row(stripped):
             rows: list[list[str]] = []
             while i < len(lines) and _is_table_row(lines[i].strip()):
-                if not _SEPARATOR_ROW.match(lines[i]):
+                if not _is_separator_row(lines[i]):
                     rows.append(_split_table_row(lines[i]))
                 i += 1
             if rows:
@@ -275,22 +284,23 @@ def apply_docx_edits(content: bytes, edits: Iterable[DocxEdit]) -> tuple[bytes, 
     guards replaces with a whitespace-normalized comparison.
     """
     document = Document(io.BytesIO(content))
-    results: list[DocxEditResult] = []
+    edit_list = list(edits)
+    results: list[DocxEditResult | None] = [None] * len(edit_list)
 
     # Deletions/insertions shift indices — apply ops sorted by paragraph
-    # DESCENDING so every edit's original address stays valid.
+    # DESCENDING so every edit's original address stays valid — but report
+    # results in the CALLER'S order (clients correlate results[i] <-> edits[i]).
     ordered = sorted(
-        list(edits),
-        key=lambda e: (e.para if e.para is not None else 10**9),
+        enumerate(edit_list),
+        key=lambda pair: (pair[1].para if pair[1].para is not None else 10**9),
         reverse=True,
     )
-
-    for edit in ordered:
-        results.append(_apply_one(document, edit))
+    for index, edit in ordered:
+        results[index] = _apply_one(document, edit)
 
     buf = io.BytesIO()
     document.save(buf)
-    return buf.getvalue(), list(reversed(results))
+    return buf.getvalue(), [r for r in results if r is not None]
 
 
 def _apply_one(document, edit: DocxEdit) -> DocxEditResult:
@@ -308,11 +318,12 @@ def _apply_one(document, edit: DocxEdit) -> DocxEditResult:
             _set_paragraph_text(extra, "")
         return DocxEditResult(edit.action, "applied")
 
-    if edit.para is None or edit.para >= len(document.paragraphs):
-        if edit.action == "insert_after" and edit.para == -1:
-            pass  # allowed: insert at start
-        else:
-            return DocxEditResult(edit.action, "not_found", "paragraph index out of range")
+    para_ok = (
+        edit.para is not None
+        and 0 <= edit.para < len(document.paragraphs)
+    ) or (edit.action == "insert_after" and edit.para == -1)
+    if not para_ok:
+        return DocxEditResult(edit.action, "not_found", "paragraph index out of range")
 
     if edit.action == "replace":
         paragraph = document.paragraphs[edit.para]
@@ -329,7 +340,17 @@ def _apply_one(document, edit: DocxEdit) -> DocxEditResult:
 
     if edit.action == "insert_after":
         rendered = Document(io.BytesIO(docx_from_markdown(edit.markdown or edit.new_text)))
-        new_elements = [p._p for p in rendered.paragraphs if p.text.strip()]
+        # Harvest block elements (paragraphs AND tables) in document order;
+        # skip empty paragraphs and the section properties element.
+        from docx.oxml.ns import qn as _qn
+
+        new_elements = []
+        for element in rendered.element.body:
+            if element.tag == _qn("w:sectPr"):
+                continue
+            if element.tag == _qn("w:p") and not "".join(element.itertext()).strip():
+                continue
+            new_elements.append(element)
         if not new_elements:
             return DocxEditResult(edit.action, "invalid", "nothing to insert")
         if edit.para == -1:
@@ -349,7 +370,16 @@ def _apply_one(document, edit: DocxEdit) -> DocxEditResult:
 
 
 def _set_paragraph_text(paragraph, new_text: str) -> None:
-    """First run keeps its formatting; the rest are emptied."""
+    """First run keeps its formatting; the rest are emptied.
+
+    Hyperlink children (``w:hyperlink``) hold their own runs that
+    ``paragraph.runs`` doesn't expose — remove them so the old link text
+    doesn't survive next to the replacement.
+    """
+    from docx.oxml.ns import qn
+
+    for hyperlink in paragraph._p.findall(qn("w:hyperlink")):
+        paragraph._p.remove(hyperlink)
     text = " ".join(new_text.split("\n"))
     if paragraph.runs:
         paragraph.runs[0].text = text
@@ -359,12 +389,35 @@ def _set_paragraph_text(paragraph, new_text: str) -> None:
         paragraph.add_run(text)
 
 
+_SAFE_HREF = re.compile(r"^(https?:|mailto:)", re.IGNORECASE)
+_ANCHOR_HREF = re.compile(r'<a\s+href="([^"]*)"')
+
+
+def _sanitize_preview_html(html: str) -> str:
+    """Neutralize unsafe URL schemes in anchors (javascript:, data:, ...).
+
+    mammoth emits only structural tags, but hyperlink hrefs come verbatim
+    from the docx relationships — a crafted document can carry
+    ``javascript:`` URLs. Allowlist http/https/mailto; safe links open in
+    a new tab so the studio SPA keeps its state.
+    """
+
+    def _fix(match: re.Match) -> str:
+        href = match.group(1)
+        if not _SAFE_HREF.match(href):
+            return "<a"  # drop the href entirely
+        return f'<a target="_blank" rel="noopener noreferrer" href="{href}"'
+
+    return _ANCHOR_HREF.sub(_fix, html)
+
+
 def docx_to_html(content: bytes) -> str:
     """Convert a .docx to display HTML via mammoth (headings, lists, tables).
 
-    mammoth emits only structural tags (p/h1..h6/ul/ol/table/strong/em/a),
-    so the result is safe to inline in a styled preview container.
+    Anchor hrefs are sanitized to http/https/mailto — see
+    :func:`_sanitize_preview_html` — so the result is safe to inline in a
+    styled preview container.
     """
     import mammoth
 
-    return mammoth.convert_to_html(io.BytesIO(content)).value
+    return _sanitize_preview_html(mammoth.convert_to_html(io.BytesIO(content)).value)

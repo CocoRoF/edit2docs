@@ -98,7 +98,7 @@ async def edit_document(req: EditDocRequest) -> EditDocResponse:
         if plan_missing:
             reply = (
                 reply.rstrip()
-                + "\n\n⚠️ 편집 계획 생성에 실패해 변경이 적용되지 않았습니다. "
+                + "\n\n[주의] 편집 계획 생성에 실패해 변경이 적용되지 않았습니다. "
                 "요청을 조금 더 구체적으로 나눠서 다시 보내주세요."
             )
 
@@ -112,7 +112,7 @@ async def edit_document(req: EditDocRequest) -> EditDocResponse:
         )
         reply = (
             reply.rstrip()
-            + f"\n\nℹ️ 계획된 작업 {len(raw_ops)}개 중 상한에 따라 앞 "
+            + f"\n\n[안내] 계획된 작업 {len(raw_ops)}개 중 상한에 따라 앞 "
             f"{_MAX_OPERATIONS}개만 이번 턴에 적용합니다. 같은 요청을 한 번 더 "
             "보내면 이어서 처리됩니다."
         )
@@ -221,9 +221,10 @@ def _apply(
                     table=raw.get("table"),
                     row=raw.get("row"),
                     col=raw.get("col"),
-                    new_text=str(raw.get("new_text") or ""),
+                    # `or ""` would erase falsy-but-real values like 0.
+                    new_text=str(raw["new_text"]) if raw.get("new_text") is not None else "",
                     old_text=raw.get("old_text"),
-                    markdown=str(raw.get("markdown") or ""),
+                    markdown=str(raw["markdown"]) if raw.get("markdown") is not None else "",
                 )
             )
         new_content, results = apply_docx_edits(content, edits)
@@ -238,7 +239,7 @@ def _apply(
             edits.append(
                 XlsxEdit(
                     action=raw["action"],
-                    sheet=str(raw.get("sheet") or ""),
+                    sheet=str(raw["sheet"]) if raw.get("sheet") is not None else "",
                     cell=raw.get("cell"),
                     value=raw.get("value"),
                     old_value=raw.get("old_value"),
