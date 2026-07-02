@@ -64,6 +64,9 @@ class GenerateDeckBody(BaseModel):
     target_pages: tuple[int, int] = (8, 12)
     canvas_format: str = "ppt169"
     style: str = Field(default="general", description="general | consultant | consultant-top")
+    # Output document family: pptx (full deck pipeline) | docx | xlsx
+    # (single writer/designer call + deterministic render).
+    output_format: str = Field(default="pptx", description="pptx | docx | xlsx")
     lang: str = "ko-KR"
     template_name: str | None = None
     # User-provided PPTX template: upload the .pptx via POST /v1/assets
@@ -178,6 +181,16 @@ async def enqueue_generate_deck(
             },
         )
 
+    if body.output_format not in ("pptx", "docx", "xlsx"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "INVALID_OUTPUT_FORMAT",
+                "message": f"output_format '{body.output_format}' 는 pptx | docx | xlsx 중 하나여야 합니다.",
+                "message_en": f"Unsupported output_format '{body.output_format}'.",
+            },
+        )
+
     deck_mode = body.deck_mode
     if deck_mode not in ("new", "template_restyle", "template_extend"):
         raise HTTPException(
@@ -218,6 +231,7 @@ async def enqueue_generate_deck(
         "target_pages": list(body.target_pages),
         "canvas_format": body.canvas_format,
         "style": body.style,
+        "output_format": body.output_format,
         "lang": body.lang,
         "template_name": body.template_name,
         "template_asset_id": (
