@@ -104,6 +104,14 @@ async def run_generate_deck(ctx: ExecutionContext) -> None:
             )
         template_pptx = await storage.get_bytes(t_asset.storage_key)
 
+    # 1c. DOCX / XLSX generation: one writer/designer call + deterministic
+    # render — handled here and returned early (the deck pipeline below is
+    # pptx-only). Stage events are emitted manually for the UI.
+    output_format: str = params.get("output_format", "pptx")
+    if output_format in ("docx", "xlsx"):
+        await _run_generate_document(ctx, output_format, convert_reqs, params, storage)
+        return
+
     # 2. Stream tool-layer StageEvents to the job event bus.
     async def on_event(event: StageEvent) -> None:
         await record_event(
@@ -218,3 +226,91 @@ def _cost_dict(cost) -> dict[str, Any]:
         "audio_seconds": cost.audio_seconds,
         "duration_seconds": cost.duration_seconds,
     }
+
+
+_DOC_MIME = {
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+
+
+async def _run_generate_document(
+    ctx: ExecutionContext, fmt: str, convert_reqs, params: dict, storage
+) -> None:
+    """DOCX / XLSX branch of the generate job (see run_generate_deck)."""
+    from ...tools import StageEvent as _StageEvent
+    from ...tools.convert import convert_to_markdown
+    from ...tools.generate_doc import GenerateDocRequest, generate_document
+
+    job = ctx.job
+    session = ctx.session
+    bus = ctx.bus
+
+    async def emit(stage: str, progress: float) -> None:
+        await record_event(
+            session=session,
+            bus=bus,
+            job_id=job.id,
+            type=JobEventType.stage,
+            payload=_StageEvent(
+                stage=stage, progress=progress, message_key=f"stages.{stage}"
+            ).model_dump(),
+        )
+        await session.commit()
+
+    await emit("strategizing", 0.2)
+    sources_markdown = [convert_to_markdown(r).markdown for r in convert_reqs]
+    resp = await generate_document(
+        GenerateDocRequest(
+            intent=params["user_intent"],
+            fmt=fmt,  # type: ignore[arg-type]
+            sources_markdown=sources_markdown,
+            lang=params.get("lang", "ko-KR"),  # type: ignore[arg-type]
+            model=params.get("model", "claude-opus-4-7"),
+            anthropic_api_key=params["anthropic_api_key"],
+        )
+    )
+    await emit("exporting", 0.9)
+
+    from ...db.models import Tenant
+
+    tenant = (
+        await session.execute(select(Tenant).where(Tenant.id == job.tenant_id))
+    ).scalar_one()
+    upload = await upload_asset(
+        session=session,
+        storage=storage,
+        tenant=tenant,
+        kind=AssetKind.pptx,
+        content=resp.content,
+        original_filename=f"{params.get('output_basename', 'document')}.{fmt}",
+        mime_type=_DOC_MIME[fmt],
+        project_id=job.project_id,
+    )
+    await emit("done", 1.0)
+
+    job.result = {
+        "pptx_asset_id": str(upload.asset.id),
+        "doc_asset_id": str(upload.asset.id),
+        "format": fmt,
+        "page_count": 0,
+        "design_spec": resp.artifact,
+        "spec_lock": "",
+        "detected_langs": [],
+        "quality_issues": [],
+        "warnings": [
+            {"code": w.code, "message": w.message} for w in resp.warnings
+        ],
+    }
+    job.cost = {
+        "input_tokens": resp.cost.input_tokens,
+        "output_tokens": resp.cost.output_tokens,
+        "cache_read_tokens": resp.cost.cache_read_tokens,
+        "cache_write_tokens": resp.cost.cache_write_tokens,
+        "image_count": 0,
+        "audio_seconds": 0.0,
+        "duration_seconds": resp.cost.duration_seconds,
+    }
+    job.status = JobStatus.done
+    job.finished_at = datetime.now(timezone.utc)
+    await session.commit()

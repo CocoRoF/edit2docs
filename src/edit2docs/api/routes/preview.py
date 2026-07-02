@@ -27,6 +27,8 @@ router = APIRouter(prefix="/v1/preview", tags=["preview"])
 
 
 class PreviewBody(BaseModel):
+    # Field name kept from the PPTX-only era for wire compatibility;
+    # any .pptx / .docx / .xlsx asset id works.
     pptx_asset_id: uuid.UUID
 
 
@@ -36,15 +38,19 @@ class PreviewSlide(BaseModel):
 
 
 class PreviewResponse(BaseModel):
-    slides: list[PreviewSlide]
-    width_px: float
-    height_px: float
+    format: str  # pptx | docx | xlsx
     page_count: int
     warnings: list[dict]
+    # pptx: one SVG per slide + canvas dims.
+    slides: list[PreviewSlide] = []
+    width_px: float | None = None
+    height_px: float | None = None
+    # docx / xlsx: a display-HTML rendering (structural tags only).
+    html: str | None = None
 
 
-@router.post("", response_model=PreviewResponse, summary="Render deck slides to SVG")
-async def preview_deck(
+@router.post("", response_model=PreviewResponse, summary="Render a document preview")
+async def preview_doc(
     body: PreviewBody,
     tenant: CurrentTenant,
     session: DbSession,
@@ -66,11 +72,38 @@ async def preview_deck(
             },
         )
 
+    from ...documents import doc_format_of
+
+    fmt = doc_format_of(asset.original_filename, asset.mime_type) or "pptx"
     storage = get_default_storage()
     content = await storage.get_bytes(asset.storage_key)
     try:
-        resp = await asyncio.to_thread(
-            render_preview, RenderPreviewRequest(pptx=content)
+        if fmt == "pptx":
+            resp = await asyncio.to_thread(
+                render_preview, RenderPreviewRequest(pptx=content)
+            )
+            return PreviewResponse(
+                format="pptx",
+                slides=[PreviewSlide(index=s.index, svg=s.svg) for s in resp.slides],
+                width_px=resp.width_px,
+                height_px=resp.height_px,
+                page_count=resp.page_count,
+                warnings=[
+                    {"code": w.code, "message": w.message} for w in resp.warnings
+                ],
+            )
+        if fmt == "docx":
+            from ...documents.docx_engine import docx_to_html
+
+            html = await asyncio.to_thread(docx_to_html, content)
+            return PreviewResponse(format="docx", page_count=1, html=html, warnings=[])
+
+        from ...documents.xlsx_engine import xlsx_outline, xlsx_to_html
+
+        html = await asyncio.to_thread(xlsx_to_html, content)
+        sheet_count = len(xlsx_outline(content)["sheets"])
+        return PreviewResponse(
+            format="xlsx", page_count=sheet_count, html=html, warnings=[]
         )
     except ValueError as exc:
         raise HTTPException(
@@ -81,11 +114,12 @@ async def preview_deck(
                 "message_en": str(exc),
             },
         ) from exc
-
-    return PreviewResponse(
-        slides=[PreviewSlide(index=s.index, svg=s.svg) for s in resp.slides],
-        width_px=resp.width_px,
-        height_px=resp.height_px,
-        page_count=resp.page_count,
-        warnings=[{"code": w.code, "message": w.message} for w in resp.warnings],
-    )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "PREVIEW_RENDER_FAILED",
+                "message": f"미리보기 렌더링 실패: {exc}",
+                "message_en": f"Preview rendering failed: {exc}",
+            },
+        ) from exc

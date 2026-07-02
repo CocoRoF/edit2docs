@@ -21,7 +21,6 @@ from ...services.jobs import record_event
 from ...storage import get_default_storage
 from ...tools import ConvertRequest, StageEvent
 from ...tools.edit_deck import ChatTurn, EditDeckRequest, edit_deck
-from .generate_deck import _infer_source_type
 from .registry import ExecutionContext, register
 
 logger = logging.getLogger(__name__)
@@ -73,6 +72,8 @@ async def run_edit_deck(ctx: ExecutionContext) -> None:
             raise RuntimeError(
                 f"source asset {src_id} not found for tenant {job.tenant_id}"
             )
+        from .generate_deck import _infer_source_type
+
         convert_reqs.append(
             ConvertRequest(
                 source_type=_infer_source_type(src_asset.mime_type),
@@ -97,31 +98,74 @@ async def run_edit_deck(ctx: ExecutionContext) -> None:
         )
         await session.commit()
 
-    resp = await edit_deck(
-        EditDeckRequest(
-            pptx=pptx_bytes,
-            instruction=instruction,
-            sources=convert_reqs,
-            chat_history=[
-                ChatTurn(role=t["role"], content=str(t.get("content", "")))
-                for t in chat_history
-                if isinstance(t, dict) and t.get("role") in ("user", "assistant")
-            ],
-            lang=lang,  # type: ignore[arg-type]
-            model=model,
-            anthropic_api_key=anthropic_api_key,
-        ),
-        on_event=on_event,
-    )
+    from ...documents import doc_format_of
+
+    fmt = doc_format_of(asset.original_filename, asset.mime_type) or "pptx"
+    turns = [
+        ChatTurn(role=t["role"], content=str(t.get("content", "")))
+        for t in chat_history
+        if isinstance(t, dict) and t.get("role") in ("user", "assistant")
+    ]
+
+    if fmt == "pptx":
+        resp = await edit_deck(
+            EditDeckRequest(
+                pptx=pptx_bytes,
+                instruction=instruction,
+                sources=convert_reqs,
+                chat_history=turns,
+                lang=lang,  # type: ignore[arg-type]
+                model=model,
+                anthropic_api_key=anthropic_api_key,
+            ),
+            on_event=on_event,
+        )
+        new_content = resp.pptx
+    else:
+        # DOCX / XLSX: one planner call + deterministic apply. The tool has
+        # no event stream of its own, so emit the stages around it.
+        from ...tools import StageEvent as _StageEvent
+        from ...tools.convert import convert_to_markdown
+        from ...tools.edit_doc import EditDocRequest, edit_document
+
+        await on_event(
+            _StageEvent(stage="planning_edits", progress=0.2, message_key="stages.planning_edits")
+        )
+        sources_markdown = [convert_to_markdown(r).markdown for r in convert_reqs]
+        resp = await edit_document(
+            EditDocRequest(
+                content=pptx_bytes,
+                fmt=fmt,  # type: ignore[arg-type]
+                instruction=instruction,
+                sources_markdown=sources_markdown,
+                chat_history=turns,
+                lang=lang,  # type: ignore[arg-type]
+                model=model,
+                anthropic_api_key=anthropic_api_key,
+            )
+        )
+        await on_event(
+            _StageEvent(stage="applying_edits", progress=0.9, message_key="stages.applying_edits")
+        )
+        await on_event(
+            _StageEvent(stage="done", progress=1.0, message_key="stages.done")
+        )
+        new_content = resp.content
 
     result: dict[str, Any] = {
         "changed": resp.changed,
-        "page_count": resp.page_count,
+        "format": fmt,
+        "page_count": getattr(resp, "page_count", 0),
         "reply": resp.reply,
         "operations": resp.operations,
         "warnings": [{"code": w.code, "message": w.message} for w in resp.warnings],
     }
 
+    _MIME = {
+        "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }
     if resp.changed:
         from ...db.models import Tenant
 
@@ -133,17 +177,17 @@ async def run_edit_deck(ctx: ExecutionContext) -> None:
             storage=storage,
             tenant=tenant,
             kind=AssetKind.pptx,
-            content=resp.pptx,
-            original_filename=f"{params.get('output_basename', 'deck')}.pptx",
-            mime_type=(
-                "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-            ),
+            content=new_content,
+            original_filename=f"{params.get('output_basename', 'document')}.{fmt}",
+            mime_type=_MIME[fmt],
             project_id=job.project_id,
         )
         result["pptx_asset_id"] = str(pptx_upload.asset.id)
+        result["doc_asset_id"] = str(pptx_upload.asset.id)
     else:
-        # Question-only turn: the deck is unchanged; keep pointing at the input.
+        # Question-only turn: the document is unchanged; keep the input id.
         result["pptx_asset_id"] = str(pptx_asset_id)
+        result["doc_asset_id"] = str(pptx_asset_id)
 
     job.result = result
     job.cost = {

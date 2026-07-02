@@ -31,6 +31,7 @@ __all__ = [
     "xlsx_from_spec",
     "xlsx_outline",
     "xlsx_to_markdown",
+    "xlsx_to_html",
     "apply_xlsx_edits",
     "XlsxEdit",
     "XlsxEditResult",
@@ -262,3 +263,31 @@ def _apply_one(wb, edit: XlsxEdit) -> XlsxEditResult:
         return XlsxEditResult(edit.action, "applied")
 
     return XlsxEditResult(edit.action, "invalid", f"unknown action {edit.action!r}")
+
+
+def xlsx_to_html(content: bytes, *, max_rows: int = 200) -> str:
+    """Every sheet as an HTML table (row-capped) for browser preview."""
+    from html import escape
+
+    wb = _load(content)
+    parts: list[str] = []
+    for ws in wb.worksheets:
+        parts.append(f"<h2>{escape(ws.title)}</h2>")
+        total = ws.max_row or 0
+        rows = list(ws.iter_rows(min_row=1, max_row=min(total, max_rows)))
+        if not rows:
+            parts.append("<p>(empty)</p>")
+            continue
+        body = ["<table>"]
+        for i, row_cells in enumerate(rows):
+            tag = "th" if i == 0 else "td"
+            cells = "".join(
+                f"<{tag}>{escape('' if c.value is None else str(c.value))}</{tag}>"
+                for c in row_cells
+            )
+            body.append(f"<tr>{cells}</tr>")
+        body.append("</table>")
+        if total > max_rows:
+            body.append(f"<p>… ({total - max_rows} more rows)</p>")
+        parts.append("".join(body))
+    return "\n".join(parts)

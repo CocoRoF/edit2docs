@@ -26,6 +26,7 @@ from docx.shared import Pt
 __all__ = [
     "docx_from_markdown",
     "docx_to_markdown",
+    "docx_to_html",
     "docx_outline",
     "apply_docx_edits",
     "DocxEdit",
@@ -356,3 +357,14 @@ def _set_paragraph_text(paragraph, new_text: str) -> None:
             run.text = ""
     else:
         paragraph.add_run(text)
+
+
+def docx_to_html(content: bytes) -> str:
+    """Convert a .docx to display HTML via mammoth (headings, lists, tables).
+
+    mammoth emits only structural tags (p/h1..h6/ul/ol/table/strong/em/a),
+    so the result is safe to inline in a styled preview container.
+    """
+    import mammoth
+
+    return mammoth.convert_to_html(io.BytesIO(content)).value
