@@ -198,7 +198,9 @@ class TestGenerateJobRoute:
 
 class TestEditJobDispatch:
     @pytest.mark.asyncio
-    async def test_docx_edit_job_runs_document_editor(self, client, monkeypatch):
+    async def test_docx_edit_job_runs_document_editor(
+        self, client, test_db, test_bus, monkeypatch
+    ):
         # Stub the planner LLM used by edit_document.
         import sys
         from dataclasses import dataclass, field
@@ -227,6 +229,16 @@ class TestEditJobDispatch:
         ed = sys.modules["edit2docs.tools.edit_doc"]
         monkeypatch.setattr(ed, "AnthropicClient", lambda **kw: _LLM())
 
+        # The route's fire-and-forget inline runner opens its own default
+        # sessionmaker (not the test override) — noop it and drive the
+        # executor manually, same as the existing job tests.
+        import edit2docs.api.routes.jobs as jobs_route
+
+        async def _noop(job_id):
+            return None
+
+        monkeypatch.setattr(jobs_route, "_run_inline", _noop)
+
         asset_id = await _upload(client, DOCX, "report.docx")
         resp = await client.post(
             "/v1/jobs/edit-deck",
@@ -234,17 +246,24 @@ class TestEditJobDispatch:
             headers={"X-Anthropic-API-Key": "sk-stub"},
         )
         assert resp.status_code == 202, resp.text
-        job_id = resp.json()["id"]
+        job_id = uuid.UUID(resp.json()["id"])
 
-        # Inline queue: poll until done.
-        import asyncio as _asyncio
+        async with test_db() as session:
+            from sqlalchemy import select
 
-        for _ in range(50):
-            job = (await client.get(f"/v1/jobs/{job_id}")).json()
-            if job["status"] in ("done", "failed"):
-                break
-            await _asyncio.sleep(0.1)
+            from edit2docs.db.models import Job
+            from edit2docs.workers.executors.edit_deck import run_edit_deck
+            from edit2docs.workers.executors.registry import ExecutionContext
+
+            job_row = (
+                await session.execute(select(Job).where(Job.id == job_id))
+            ).scalar_one()
+            await run_edit_deck(
+                ExecutionContext(session=session, bus=test_bus, job=job_row)
+            )
+
+        job = (await client.get(f"/v1/jobs/{job_id}")).json()
         assert job["status"] == "done", job
         assert job["result"]["format"] == "docx"
         assert job["result"]["changed"] is True
-        assert job["result"]["doc_asset_id"] != asset_id
+        assert job["result"]["doc_asset_id"] != str(asset_id)
