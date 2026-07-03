@@ -83,9 +83,18 @@ job queue, S3-compatible storage, PPTX studio endpoints.
   deterministic renderer (python-docx) turns it into styled Word. Edits are
   paragraph-addressed operations (`replace` / `insert_after` / `delete`,
   table cells by row/col) so untouched paragraphs keep their formatting.
+  The hosted preview is a native, *addressable* HTML rendering: every
+  paragraph carries `data-e2d-para` and every table cell
+  `data-e2d-table`/`data-e2d-cell` — the same addresses the outline and
+  the live-edit op stream use — plus real merged cells, alignment,
+  colors, images, footnotes and page breaks (mirroring the PPTX canvas's
+  `data-e2p-*` tags).
 * **XLSX** — the designer LLM emits a YAML *sheet spec* (sheets / headers /
   rows / number formats, formulas allowed); openpyxl renders styled sheets.
   Edits are `set_cell` / `append_rows` / `add_sheet` with staleness guards.
+  The hosted preview renders a spreadsheet-style grid (column letters, row
+  numbers, merged ranges, cached formula results) with every cell stamped
+  `data-e2d-cell="B3"` — exactly the address `set_cell` takes.
 * **PPTX** — the full multi-stage deck pipeline inherited from edit2ppt:
   strategist → per-page SVG → native DrawingML, user-PPTX templates
   (restyle/extend), chat-edit with slide recompose, per-paragraph text edits

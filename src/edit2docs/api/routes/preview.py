@@ -103,17 +103,19 @@ async def preview_doc(
                 ],
             )
         if fmt == "docx":
-            from ...documents.docx_engine import docx_to_html
+            from ...documents.docx_engine import docx_preview
 
-            html = await asyncio.to_thread(docx_to_html, content)
-            return PreviewResponse(format="docx", page_count=1, html=html, warnings=[])
+            html, doc_warnings = await asyncio.to_thread(docx_preview, content)
+            return PreviewResponse(
+                format="docx", page_count=1, html=html, warnings=doc_warnings
+            )
 
-        from ...documents.xlsx_engine import xlsx_outline, xlsx_to_html
+        from ...documents.xlsx_engine import xlsx_outline, xlsx_preview
 
-        html = await asyncio.to_thread(xlsx_to_html, content)
+        html, sheet_warnings = await asyncio.to_thread(xlsx_preview, content)
         sheet_count = len(xlsx_outline(content)["sheets"])
         return PreviewResponse(
-            format="xlsx", page_count=sheet_count, html=html, warnings=[]
+            format="xlsx", page_count=sheet_count, html=html, warnings=sheet_warnings
         )
     except ValueError as exc:
         raise HTTPException(

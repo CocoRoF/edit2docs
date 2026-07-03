@@ -89,7 +89,9 @@ class TestPreviewDispatch:
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["format"] == "docx"
-        assert "<h1>" in body["html"] and "첫 문단" in body["html"]
+        assert "<h1" in body["html"] and "첫 문단" in body["html"]
+        # The preview is addressable: paragraph addresses match the outline.
+        assert 'data-e2d-para="' in body["html"]
         assert body["slides"] == []
 
     @pytest.mark.asyncio
@@ -99,7 +101,9 @@ class TestPreviewDispatch:
         assert resp.status_code == 200
         body = resp.json()
         assert body["format"] == "xlsx"
-        assert "<table>" in body["html"] and "1분기" in body["html"]
+        assert "<table" in body["html"] and "1분기" in body["html"]
+        # The preview is addressable: cells carry set_cell-style addresses.
+        assert 'data-e2d-cell="A2"' in body["html"]
         assert body["page_count"] == 1  # one sheet
 
 
