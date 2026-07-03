@@ -32,6 +32,7 @@ __all__ = [
     "xlsx_outline",
     "xlsx_to_markdown",
     "xlsx_to_html",
+    "xlsx_preview",
     "apply_xlsx_edits",
     "XlsxEdit",
     "XlsxEditResult",
@@ -291,29 +292,125 @@ def _apply_one(wb, edit: XlsxEdit) -> XlsxEditResult:
     return XlsxEditResult(edit.action, "invalid", f"unknown action {edit.action!r}")
 
 
-def xlsx_to_html(content: bytes, *, max_rows: int = 200) -> str:
-    """Every sheet as an HTML table (row-capped) for browser preview."""
+def xlsx_preview(content: bytes, *, max_rows: int = 200) -> tuple[str, list[dict]]:
+    """Addressable display HTML + warnings for the studio preview.
+
+    Structure per sheet: ``<section class="e2d-sheet" data-e2d-sheet="이름">``
+    with a spreadsheet-style grid — column-letter header row, row-number
+    column, and every data cell stamped ``data-e2d-cell="B3"`` (the exact
+    address ``set_cell`` edits take, mirroring the DOCX preview's
+    ``data-e2d-para`` convention). Merged ranges render as real
+    colspan/rowspan. Formula cells display their cached result when the
+    file carries one (the formula moves to the ``title`` tooltip) instead
+    of the raw ``=SUM(...)`` text the old preview showed.
+    """
     from html import escape
 
     wb = _load(content)
+    warnings: list[dict] = []
+    try:  # cached formula results live in a second, values-only read
+        wb_values = load_workbook(io.BytesIO(content), data_only=True)
+    except Exception:
+        wb_values = None
+
     parts: list[str] = []
     for ws in wb.worksheets:
+        parts.append(f'<section class="e2d-sheet" data-e2d-sheet="{escape(ws.title, quote=True)}">')
         parts.append(f"<h2>{escape(ws.title)}</h2>")
         total = ws.max_row or 0
+        cols = ws.max_column or 0
         rows = list(ws.iter_rows(min_row=1, max_row=min(total, max_rows)))
         if not rows:
-            parts.append("<p>(empty)</p>")
+            parts.append("<p>(empty)</p></section>")
             continue
-        body = ["<table>"]
-        for i, row_cells in enumerate(rows):
-            tag = "th" if i == 0 else "td"
-            cells = "".join(
-                f"<{tag}>{escape('' if c.value is None else str(c.value))}</{tag}>"
-                for c in row_cells
+        ws_values = None
+        if wb_values is not None and ws.title in wb_values.sheetnames:
+            ws_values = wb_values[ws.title]
+
+        # Merged ranges: top-left renders with span; covered cells skip.
+        spans: dict[tuple[int, int], tuple[int, int]] = {}
+        covered: set[tuple[int, int]] = set()
+        for rng in ws.merged_cells.ranges:
+            spans[(rng.min_row, rng.min_col)] = (
+                rng.max_row - rng.min_row + 1,
+                rng.max_col - rng.min_col + 1,
             )
-            body.append(f"<tr>{cells}</tr>")
+            for rr in range(rng.min_row, rng.max_row + 1):
+                for cc in range(rng.min_col, rng.max_col + 1):
+                    if (rr, cc) != (rng.min_row, rng.min_col):
+                        covered.add((rr, cc))
+
+        # Header heuristic: an explicit freeze line below row 1, or an
+        # all-text first row over data rows.
+        first_row = [c.value for c in rows[0]]
+        frozen_header = bool(ws.freeze_panes and str(ws.freeze_panes)[1:].isdigit()
+                             and int(str(ws.freeze_panes)[1:] or 1) > 1)
+        texty_header = (
+            len(rows) > 1
+            and any(v is not None for v in first_row)
+            and all(isinstance(v, str) for v in first_row if v is not None)
+        )
+        header_rows = 1 if (frozen_header or texty_header) else 0
+
+        body = ['<table class="e2d-grid">']
+        # Column-letter header row (A, B, C…) with a corner cell.
+        letters = "".join(
+            f'<th class="e2d-colhead">{get_column_letter(ci)}</th>'
+            for ci in range(1, cols + 1)
+        )
+        body.append(f'<tr><th class="e2d-corner"></th>{letters}</tr>')
+        for row_cells in rows:
+            row_number = row_cells[0].row if row_cells else 1
+            cells_html = [f'<th class="e2d-rowhead">{row_number}</th>']
+            for cell in row_cells:
+                key = (cell.row, cell.column)
+                if key in covered:
+                    continue
+                span_attr = ""
+                if key in spans:
+                    rowspan, colspan = spans[key]
+                    if rowspan > 1:
+                        span_attr += f' rowspan="{rowspan}"'
+                    if colspan > 1:
+                        span_attr += f' colspan="{colspan}"'
+                value = cell.value
+                title_attr = ""
+                if isinstance(value, str) and value.startswith("="):
+                    title_attr = f' title="{escape(value, quote=True)}"'
+                    if ws_values is not None:
+                        cached = ws_values.cell(row=cell.row, column=cell.column).value
+                        if cached is not None:
+                            value = cached
+                css_class = ""
+                if isinstance(value, (int, float)):
+                    css_class = ' class="e2d-num"'
+                    if isinstance(value, float) and value.is_integer():
+                        value = int(value)
+                text = escape("" if value is None else str(value))
+                tag = "th" if cell.row <= header_rows else "td"
+                cells_html.append(
+                    f'<{tag} data-e2d-cell="{cell.coordinate}"'
+                    f"{span_attr}{title_attr}{css_class}>{text}</{tag}>"
+                )
+            body.append(f"<tr>{''.join(cells_html)}</tr>")
         body.append("</table>")
         if total > max_rows:
             body.append(f"<p>… ({total - max_rows} more rows)</p>")
+            warnings.append(
+                {
+                    "code": "preview_rows_truncated",
+                    "message": (
+                        f"Sheet {ws.title!r}: {total} rows; preview shows the "
+                        f"first {max_rows}. 미리보기는 앞 {max_rows}행만 표시합니다."
+                    ),
+                }
+            )
         parts.append("".join(body))
-    return "\n".join(parts)
+        parts.append("</section>")
+    return "\n".join(parts), warnings
+
+
+def xlsx_to_html(content: bytes, *, max_rows: int = 200) -> str:
+    """Every sheet as an HTML grid (row-capped) — see :func:`xlsx_preview`."""
+    html, _warnings = xlsx_preview(content, max_rows=max_rows)
+    return html

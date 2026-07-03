@@ -27,6 +27,7 @@ __all__ = [
     "docx_from_markdown",
     "docx_to_markdown",
     "docx_to_html",
+    "docx_preview",
     "docx_outline",
     "apply_docx_edits",
     "DocxEdit",
@@ -220,23 +221,55 @@ def docx_outline(content: bytes) -> list[dict]:
     """Paragraph outline with the addresses ``apply_docx_edits`` accepts.
 
     Entries: ``{"para": i, "style", "text"}`` for body paragraphs and
-    ``{"table": t, "row": r, "col": c, "text"}`` for table cells (first
-    paragraph of each cell).
+    ``{"table": t, "row": r, "col": c, "text"}`` for table cells — in
+    **document order** (tables appear where they sit between paragraphs),
+    so the edit planner sees the real structure of the page.
+
+    Merged cells are reported once, at their top-left grid address (the
+    same cell object python-docx returns for every covered position — and
+    the address a ``replace`` edit actually mutates).
     """
+    from docx.oxml.ns import qn
+
     document = Document(io.BytesIO(content))
+    paragraphs = document.paragraphs
+    tables = document.tables
     outline: list[dict] = []
-    for i, paragraph in enumerate(document.paragraphs):
-        text = paragraph.text.strip()
-        if not text:
-            continue
-        style = paragraph.style.name if paragraph.style is not None else "Normal"
-        outline.append({"para": i, "style": style, "text": text})
-    for t, table in enumerate(document.tables):
-        for r, row in enumerate(table.rows):
-            for c, cell in enumerate(row.cells):
+    para_index = -1
+    table_index = -1
+    for element in document.element.body:
+        if element.tag == qn("w:p"):
+            para_index += 1
+            paragraph = paragraphs[para_index]
+            text = paragraph.text.strip()
+            if not text:
+                continue
+            style = paragraph.style.name if paragraph.style is not None else "Normal"
+            outline.append({"para": para_index, "style": style, "text": text})
+        elif element.tag == qn("w:tbl"):
+            table_index += 1
+            table = tables[table_index]
+            # Merged cells share one w:tc element; report each once, at its
+            # top-left grid address. Materialize all cells FIRST — holding
+            # the wrappers keeps their lxml proxies alive, which is what
+            # makes id()-identity of `_tc` reliable (a collected proxy's id
+            # can be reused by a different element).
+            grid = [
+                (r, c, cell)
+                for r, row in enumerate(table.rows)
+                for c, cell in enumerate(row.cells)
+            ]
+            seen: set[int] = set()
+            for r, c, cell in grid:
+                key = id(cell._tc)
+                if key in seen:
+                    continue
+                seen.add(key)
                 text = cell.text.strip()
                 if text:
-                    outline.append({"table": t, "row": r, "col": c, "text": text})
+                    outline.append(
+                        {"table": table_index, "row": r, "col": c, "text": text}
+                    )
     return outline
 
 
@@ -411,13 +444,49 @@ def _sanitize_preview_html(html: str) -> str:
     return _ANCHOR_HREF.sub(_fix, html)
 
 
-def docx_to_html(content: bytes) -> str:
-    """Convert a .docx to display HTML via mammoth (headings, lists, tables).
+def docx_preview(content: bytes) -> tuple[str, list[dict]]:
+    """Addressable display HTML + warnings for the studio preview.
 
-    Anchor hrefs are sanitized to http/https/mailto — see
-    :func:`_sanitize_preview_html` — so the result is safe to inline in a
-    styled preview container.
+    Primary path is the native renderer (:mod:`.docx_html`): document-order
+    HTML where every body paragraph carries ``data-e2d-para`` and every
+    table cell ``data-e2d-table`` / ``data-e2d-cell`` — the exact addresses
+    ``docx_outline`` reports and the live-edit op stream targets, so the
+    canvas can locate and highlight the region an edit touches (same
+    convention as the PPTX preview's ``data-e2p-*`` tags).
+
+    Any renderer failure falls back to the legacy mammoth conversion (with
+    a warning entry) so a preview is always produced for a readable file.
     """
+    from .docx_html import render_docx_html
+
+    try:
+        result = render_docx_html(content)
+        return result.html, result.warnings
+    except Exception as exc:
+        html = _mammoth_html(content)
+        return html, [
+            {
+                "code": "preview_native_render_failed",
+                "message": (
+                    f"Native DOCX renderer failed ({exc}); fell back to the "
+                    "legacy converter. 기본 렌더러가 실패해 대체 변환기를 사용했습니다."
+                ),
+            }
+        ]
+
+
+def _mammoth_html(content: bytes) -> str:
     import mammoth
 
     return _sanitize_preview_html(mammoth.convert_to_html(io.BytesIO(content)).value)
+
+
+def docx_to_html(content: bytes) -> str:
+    """Convert a .docx to display HTML (addressable; see :func:`docx_preview`).
+
+    Anchor hrefs are restricted to http/https/mailto in both the native
+    renderer and the mammoth fallback, so the result is safe to inline in
+    a styled preview container.
+    """
+    html, _warnings = docx_preview(content)
+    return html
