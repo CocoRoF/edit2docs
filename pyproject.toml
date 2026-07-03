@@ -1,6 +1,6 @@
 [project]
 name = "edit2docs"
-version = "0.2.1"
+version = "0.3.0"
 description = "AI-agent-native document engine: generate and chat-edit DOCX, XLSX and PPTX as a Python library, agent tool set, MCP server or hosted service. Korean-first. Sister project of edit2ppt."
 readme = "README.md"
 requires-python = ">=3.11"

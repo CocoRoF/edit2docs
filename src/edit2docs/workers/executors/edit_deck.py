@@ -124,13 +124,10 @@ async def run_edit_deck(ctx: ExecutionContext) -> None:
     else:
         # DOCX / XLSX: one planner call + deterministic apply. The tool has
         # no event stream of its own, so emit the stages around it.
-        from ...tools import StageEvent as _StageEvent
+        # edit_document now streams its own plan/op/done stage events.
         from ...tools.convert import convert_to_markdown
         from ...tools.edit_doc import EditDocRequest, edit_document
 
-        await on_event(
-            _StageEvent(stage="planning_edits", progress=0.2, message_key="stages.planning_edits")
-        )
         import asyncio as _asyncio
 
         converted = await _asyncio.gather(
@@ -147,13 +144,8 @@ async def run_edit_deck(ctx: ExecutionContext) -> None:
                 lang=lang,  # type: ignore[arg-type]
                 model=model,
                 anthropic_api_key=anthropic_api_key,
-            )
-        )
-        await on_event(
-            _StageEvent(stage="applying_edits", progress=0.9, message_key="stages.applying_edits")
-        )
-        await on_event(
-            _StageEvent(stage="done", progress=1.0, message_key="stages.done")
+            ),
+            on_event=on_event,
         )
         new_content = resp.content
 

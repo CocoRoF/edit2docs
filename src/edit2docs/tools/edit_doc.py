@@ -18,8 +18,9 @@ from pydantic import Field
 from ..documents.docx_engine import DocxEdit, apply_docx_edits, docx_outline
 from ..documents.xlsx_engine import XlsxEdit, apply_xlsx_edits, xlsx_outline
 from ..llm import AnthropicClient, DEFAULT_MODEL, build_output_lang_directive, load_prompt
+from ._edit_events import op_event_vars, op_summary, plan_event_vars
 from .edit_deck import ChatTurn, _cost_from_usage, _parse_plan
-from .generate_deck import _merge_cost
+from .generate_deck import EventCallback, StageEvent, _emit, _merge_cost
 from .types import (
     CostBreakdown,
     DEFAULT_LANG,
@@ -55,11 +56,17 @@ class EditDocResponse(ToolResponse):
     warnings: list[WarningEntry] = Field(default_factory=list)
 
 
-async def edit_document(req: EditDocRequest) -> EditDocResponse:
+async def edit_document(
+    req: EditDocRequest, *, on_event: EventCallback = None
+) -> EditDocResponse:
     started = time.perf_counter()
     warnings: list[WarningEntry] = []
     cost = CostBreakdown()
 
+    await _emit(
+        on_event,
+        StageEvent(stage="planning_edits", progress=0.2, message_key="stages.planning_edits"),
+    )
     outline_text = _outline_context(req)
     client = AnthropicClient(api_key=req.anthropic_api_key, model=req.model)
     system = (
@@ -121,10 +128,39 @@ async def edit_document(req: EditDocRequest) -> EditDocResponse:
     applied_ops: list[dict] = []
     new_content = req.content
     if raw_ops:
-        new_content, applied_ops, op_warnings = _apply(req.fmt, req.content, raw_ops)
+        # Announce the plan, then stream each op's result as it's applied.
+        valid_ops = [
+            op for op in raw_ops
+            if isinstance(op, dict) and op.get("action") in _VALID_ACTIONS[req.fmt]
+        ]
+        await _emit(
+            on_event,
+            StageEvent(
+                stage="editing_slides", progress=0.6,
+                message_key="stages.editing_slides",
+                message_vars=plan_event_vars(req.fmt, valid_ops),
+            ),
+        )
+        new_content, applied_ops, op_warnings, op_results = _apply(
+            req.fmt, req.content, raw_ops
+        )
         warnings.extend(op_warnings)
+        total = len(op_results)
+        for i, (op, status) in enumerate(op_results):
+            await _emit(
+                on_event,
+                StageEvent(
+                    stage="applying_edits", progress=0.85,
+                    message_key="stages.applying_edits",
+                    message_vars=op_event_vars(
+                        op_summary(req.fmt, op, index=i, total=total),
+                        phase="done", status=status,
+                    ),
+                ),
+            )
 
     changed = bool(applied_ops)
+    await _emit(on_event, StageEvent(stage="done", progress=1.0, message_key="stages.done"))
     return EditDocResponse(
         content=new_content if changed else req.content,
         changed=changed,
@@ -202,10 +238,22 @@ def _build_user_message(req: EditDocRequest, outline: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+_VALID_ACTIONS = {
+    "docx": ("replace", "insert_after", "delete"),
+    "xlsx": ("set_cell", "append_rows", "add_sheet"),
+}
+
+
 def _apply(
     fmt: str, content: bytes, raw_ops: list
-) -> tuple[bytes, list[dict], list[WarningEntry]]:
+) -> tuple[bytes, list[dict], list[WarningEntry], list[tuple[dict, str]]]:
+    """Returns (bytes, applied_summaries, warnings, [(raw_op, status), ...]).
+
+    The last element carries every VALID op paired with its result status,
+    in input order, so the caller can stream per-op events with targets.
+    """
     warnings: list[WarningEntry] = []
+    valid_raw: list[dict] = []
     if fmt == "docx":
         edits = []
         for raw in raw_ops:
@@ -214,6 +262,7 @@ def _apply(
             ):
                 warnings.append(_skip_warning(raw))
                 continue
+            valid_raw.append(raw)
             edits.append(
                 DocxEdit(
                     action=raw["action"],
@@ -236,6 +285,7 @@ def _apply(
             ):
                 warnings.append(_skip_warning(raw))
                 continue
+            valid_raw.append(raw)
             edits.append(
                 XlsxEdit(
                     action=raw["action"],
@@ -250,7 +300,9 @@ def _apply(
         new_content, results = apply_xlsx_edits(content, edits)
 
     applied: list[dict] = []
-    for edit, result in zip(edits, results):
+    op_results: list[tuple[dict, str]] = []
+    for raw, result in zip(valid_raw, results):
+        op_results.append((raw, result.status))
         summary = {"action": result.action, "status": result.status}
         if result.status == "applied":
             applied.append(summary)
@@ -261,7 +313,7 @@ def _apply(
                     message=f"{result.action} skipped ({result.status}): {result.message}",
                 )
             )
-    return (new_content if applied else content), applied, warnings
+    return (new_content if applied else content), applied, warnings, op_results
 
 
 def _skip_warning(raw) -> WarningEntry:
