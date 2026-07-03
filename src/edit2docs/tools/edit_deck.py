@@ -190,6 +190,23 @@ async def edit_deck(
         )
 
     # Stage 3: generate SVGs for edit/add ops (LLM, parallel).
+    # Announce the whole plan up front so the studio can render the todo
+    # list and highlight each target as it streams.
+    from ._edit_events import op_event_vars, op_summary, plan_event_vars
+
+    op_summaries = {
+        id(op): op_summary("pptx", op, index=i, total=len(operations))
+        for i, op in enumerate(operations)
+    }
+    await _emit(
+        on_event,
+        StageEvent(
+            stage="planning_edits",
+            progress=0.38,
+            message_key="stages.planning_edits",
+            message_vars=plan_event_vars("pptx", operations),
+        ),
+    )
     await _emit(
         on_event,
         StageEvent(stage="editing_slides", progress=0.40, message_key="stages.editing_slides"),
@@ -197,6 +214,15 @@ async def edit_deck(
     slide_system = build_output_lang_directive(req.lang) + "\n\n" + load_prompt("editor-slide")
 
     async def _gen(op: dict) -> tuple[dict, str | None]:
+        await _emit(
+            on_event,
+            StageEvent(
+                stage="editing_slides",
+                progress=0.5,
+                message_key="stages.editing_slides",
+                message_vars=op_event_vars(op_summaries[id(op)], phase="start"),
+            ),
+        )
         if op["action"] == "edit":
             base_svg = slide_svgs[op["slide"] - 1]
             task = f"Edit this slide according to the brief.\n\n## Brief\n{op['brief']}"
@@ -233,13 +259,46 @@ async def edit_deck(
                     ),
                 )
             )
+            await _emit(
+                on_event,
+                StageEvent(
+                    stage="editing_slides", progress=0.6,
+                    message_key="stages.editing_slides",
+                    message_vars=op_event_vars(
+                        op_summaries[id(op)], phase="done", status="failed"
+                    ),
+                ),
+            )
             return op, None
         svg = _restore_images(svg, image_map)
         svg = scale_svg_to_viewbox(svg, canvas_w, canvas_h)
         repaired = repair_layout(svg, canvas=(int(canvas_w), int(canvas_h)))
+        await _emit(
+            on_event,
+            StageEvent(
+                stage="editing_slides", progress=0.6,
+                message_key="stages.editing_slides",
+                message_vars=op_event_vars(
+                    op_summaries[id(op)], phase="done", status="applied"
+                ),
+            ),
+        )
         return op, repaired.repaired_svg
 
     svg_ops = [op for op in operations if op["action"] in ("edit", "add")]
+    # Emit delete ops (no LLM step) as their own done events for the UI.
+    for op in operations:
+        if op["action"] == "delete":
+            await _emit(
+                on_event,
+                StageEvent(
+                    stage="editing_slides", progress=0.55,
+                    message_key="stages.editing_slides",
+                    message_vars=op_event_vars(
+                        op_summaries[id(op)], phase="done", status="applied"
+                    ),
+                ),
+            )
     generated = await asyncio.gather(*(_gen(op) for op in svg_ops))
     svg_by_op_id = {id(op): svg for op, svg in generated}
 

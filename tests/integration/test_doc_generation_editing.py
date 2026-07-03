@@ -212,3 +212,74 @@ class TestUnifiedFacade:
         assert info["format"] == "docx"
         res = run_tool("preview_doc", {"doc": str(docx_path), "out_dir": str(tmp_path / "p")})
         assert res["preview_path"].endswith("preview.md")
+
+
+class TestEditStreaming:
+    """Per-operation live-edit events for the studio."""
+
+    @pytest.mark.asyncio
+    async def test_docx_edit_emits_plan_and_op_events(self, monkeypatch):
+        content = docx_from_markdown("첫 문단\n\n둘째 문단")
+        plan = (
+            "```reply\n두 문단을 수정합니다.\n```\n"
+            "```edit_plan\noperations:\n"
+            "  - action: replace\n    para: 0\n    new_text: \"수정1\"\n"
+            "  - action: replace\n    para: 1\n    new_text: \"수정2\"\n```"
+        )
+        llm = _ScriptedLLM(outputs=[plan])
+        _wire(monkeypatch, "edit2docs.tools.edit_doc", llm)
+
+        events: list = []
+
+        async def on_event(e):
+            events.append(e)
+
+        resp = await edit_document(
+            EditDocRequest(content=content, fmt="docx", instruction="고쳐줘",
+                           anthropic_api_key="sk-stub"),
+            on_event=on_event,
+        )
+        assert resp.changed is True
+
+        plan_evs = [e for e in events if "plan" in e.message_vars]
+        assert len(plan_evs) == 1
+        planned = plan_evs[0].message_vars["plan"]
+        assert len(planned) == 2
+        assert planned[0]["target"] == {"kind": "paragraph", "para": 0}
+        assert "0번 문단 교체" in planned[0]["label"]
+
+        op_evs = [e for e in events if "op" in e.message_vars]
+        done = [e.message_vars["op"] for e in op_evs if e.message_vars["op"]["phase"] == "done"]
+        assert len(done) == 2
+        assert all(o["status"] == "applied" for o in done)
+        assert {o["target"]["para"] for o in done} == {0, 1}
+        # stage bookends present
+        stages = [e.stage for e in events]
+        assert stages[0] == "planning_edits" and stages[-1] == "done"
+
+    @pytest.mark.asyncio
+    async def test_xlsx_edit_op_targets(self, monkeypatch):
+        content = xlsx_from_spec({"sheets": [{"name": "S", "headers": ["a"], "rows": [[1]]}]})
+        plan = (
+            "```reply\n셀을 수정합니다.\n```\n"
+            "```edit_plan\noperations:\n"
+            "  - action: set_cell\n    sheet: \"S\"\n    cell: \"A2\"\n    value: 9\n```"
+        )
+        llm = _ScriptedLLM(outputs=[plan])
+        _wire(monkeypatch, "edit2docs.tools.edit_doc", llm)
+        events: list = []
+
+        async def on_event(e):
+            events.append(e)
+
+        await edit_document(
+            EditDocRequest(content=content, fmt="xlsx", instruction="A2를 9로",
+                           anthropic_api_key="sk-stub"),
+            on_event=on_event,
+        )
+        op_done = [
+            e.message_vars["op"] for e in events
+            if "op" in e.message_vars and e.message_vars["op"]["phase"] == "done"
+        ]
+        assert len(op_done) == 1
+        assert op_done[0]["target"] == {"kind": "cell", "sheet": "S", "cell": "A2"}
