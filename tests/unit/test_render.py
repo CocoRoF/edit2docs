@@ -119,11 +119,20 @@ class TestRenderDoc:
         assert all(p.suffix == ".svg" for p in result.paths)
         assert "<svg" in result.paths[0].read_text(encoding="utf-8")
 
-    def test_docx_not_yet_supported(self, tmp_path):
+    def test_docx_renders_pages(self, tmp_path):
         from edit2docs.documents.docx_engine import docx_from_markdown
 
         p = tmp_path / "d.docx"
-        p.write_bytes(docx_from_markdown("# hi"))
+        p.write_bytes(docx_from_markdown("# hi\n\nbody text"))
+        result = render_doc(p, to="png", dpi=96)
+        assert result.format == "docx" and result.page_count >= 1
+        assert result.paths[0].read_bytes().startswith(PNG_MAGIC)
+
+    def test_xlsx_not_yet_supported(self, tmp_path):
+        from edit2docs.documents.xlsx_engine import xlsx_from_spec
+
+        p = tmp_path / "b.xlsx"
+        p.write_bytes(xlsx_from_spec({"sheets": [{"name": "S", "headers": ["a"], "rows": [[1]]}]}))
         with pytest.raises(ValueError, match="preview_doc"):
             render_doc(p, to="png")
 

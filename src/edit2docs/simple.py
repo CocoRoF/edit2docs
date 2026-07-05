@@ -479,11 +479,11 @@ def render_doc(
     to = (to or "png").strip().lower()
     if to not in ("png", "pdf", "svg"):
         raise ValueError(f"Unsupported render target: {to!r} (use png / pdf / svg)")
-    if fmt != "pptx":
+    if fmt == "xlsx":
         raise ValueError(
-            f".{fmt} page rendering is not available yet (native-render plan "
-            "M3/M4) — use preview_doc() for its HTML preview. "
-            f".{fmt} 페이지 렌더링은 아직 미지원입니다 — preview_doc()의 HTML "
+            ".xlsx page rendering is not available yet (native-render plan "
+            "M4) — use preview_doc() for its HTML preview. "
+            ".xlsx 페이지 렌더링은 아직 미지원입니다 — preview_doc()의 HTML "
             "프리뷰를 사용하세요."
         )
 
@@ -491,7 +491,12 @@ def render_doc(
     out = Path(out_dir) if out_dir is not None else src.parent / "render"
     out.mkdir(parents=True, exist_ok=True)
 
-    svgs = preview_pptx(src)  # list[str] — per-slide self-contained SVG
+    if fmt == "docx":
+        from .documents.docx_pages import docx_to_page_svgs
+
+        svgs = docx_to_page_svgs(src.read_bytes())
+    else:
+        svgs = preview_pptx(src)  # list[str] — per-slide self-contained SVG
 
     from .render import svgs_to_pdf, svgs_to_pngs
 
