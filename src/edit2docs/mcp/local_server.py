@@ -109,6 +109,29 @@ def build_local_mcp_server() -> FastMCP:
         return {"preview_path": str(rendered)}
 
     @mcp.tool(
+        name="render_doc",
+        description=(
+            "Render a .pptx/.docx/.xlsx to page images or a PDF via the "
+            "LibreOffice-free native pipeline. to='png' -> page-1.png..N, "
+            "to='pdf' -> <stem>.pdf, to='svg' -> vector pages. "
+            "Deterministic, no LLM, no key."
+        ),
+    )
+    async def render_doc_tool(
+        doc: str,
+        to: str = "png",
+        out_dir: str | None = None,
+        dpi: float = 144.0,
+    ) -> dict[str, Any]:
+        result = simple.render_doc(doc, to=to, out_dir=out_dir, dpi=dpi)
+        return {
+            "paths": [str(p) for p in result.paths],
+            "page_count": result.page_count,
+            "format": result.format,
+            "to": result.to,
+        }
+
+    @mcp.tool(
         name="set_doc_text",
         description=(
             "Deterministic targeted edits (instant, no LLM, formatting "

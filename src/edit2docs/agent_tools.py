@@ -123,6 +123,36 @@ ANTHROPIC_TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "render_doc",
+        "description": (
+            "Render a .pptx/.docx/.xlsx to page images or a PDF — the "
+            "LibreOffice-free native pipeline (per-page SVG -> resvg PNG "
+            "-> PDF). to='png' writes page-1.png..N, to='pdf' one "
+            "<stem>.pdf, to='svg' the vector pages. Deterministic, no "
+            "LLM, no key."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "doc": _DOC_PATH,
+                "to": {
+                    "type": "string",
+                    "enum": ["png", "pdf", "svg"],
+                    "description": "Output kind (default png).",
+                },
+                "out_dir": {
+                    "type": "string",
+                    "description": "Output directory (default <doc dir>/render).",
+                },
+                "dpi": {
+                    "type": "number",
+                    "description": "Raster resolution (default 144).",
+                },
+            },
+            "required": ["doc"],
+        },
+    },
+    {
         "name": "set_doc_text",
         "description": (
             "Deterministic targeted edits (instant, no LLM, formatting "
@@ -210,6 +240,20 @@ async def run_tool_async(
             "reply": result.reply,
             "operations": result.operations,
         }
+    if name == "render_doc":
+        result = simple.render_doc(
+            args["doc"],
+            to=args.get("to", "png"),
+            out_dir=args.get("out_dir"),
+            dpi=float(args.get("dpi", 144.0)),
+        )
+        return {
+            "paths": [str(p) for p in result.paths],
+            "page_count": result.page_count,
+            "format": result.format,
+            "to": result.to,
+        }
+
     if name == "preview_doc":
         rendered = simple.preview_doc(args["doc"], out_dir=args["out_dir"])
         if isinstance(rendered, list):
