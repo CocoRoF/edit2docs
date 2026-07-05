@@ -106,6 +106,26 @@ def convert_tbl(
     body_parts: list[str] = []
     defs: list[str] = []
 
+    # Default table style (native-render plan M2c): PowerPoint tables
+    # carry firstRow/bandRow flags on <a:tblPr> and inherit their look
+    # from the theme's table-style matrix, which we don't reproduce.
+    # Cells without an explicit fill get a light accent1 approximation
+    # (readable with the default dark text): medium tint header, faint
+    # banding, hairline grid. Explicit tcPr fills always win.
+    tbl_pr = tbl.find("a:tblPr", NS)
+    _flag = lambda name: (tbl_pr is not None and tbl_pr.attrib.get(name) == "1")  # noqa: E731
+    style_first_row = _flag("firstRow")
+    style_band_row = _flag("bandRow")
+    accent_hex = (palette.resolve_scheme("accent1") if palette else None) or "4472C4"
+
+    def _tint(hex6: str, frac: float) -> str:
+        r, g, b = (int(hex6[i:i + 2], 16) for i in (0, 2, 4))
+        mix = lambda ch: int(round(ch + (255 - ch) * frac))  # noqa: E731
+        return f"#{mix(r):02X}{mix(g):02X}{mix(b):02X}"
+
+    header_fill = _tint(accent_hex, 0.55)
+    band_fill = _tint(accent_hex, 0.88)
+
     # Pass A: cell backgrounds.
     for r, row_cells in enumerate(cells):
         for c, cell in enumerate(row_cells):
@@ -122,13 +142,28 @@ def convert_tbl(
                 id_seq=grad_seq,
             )
             defs.extend(fill.defs)
-            attrs = fill.attrs or {"fill": "none"}
+            attrs = dict(fill.attrs or {})
+            if not attrs:
+                if style_first_row and r == 0:
+                    attrs = {"fill": header_fill}
+                elif style_band_row and (r - (1 if style_first_row else 0)) % 2 == 0:
+                    attrs = {"fill": band_fill}
+                else:
+                    attrs = {"fill": "none"}
+            attrs.setdefault("stroke", "#C9C9C9")
+            attrs.setdefault("stroke-width", "0.75")
             attr_str = "".join(f' {k}="{v}"' for k, v in attrs.items())
             body_parts.append(
                 f'<rect x="{fmt_num(rect_x)}" y="{fmt_num(rect_y)}" '
                 f'width="{fmt_num(rect_w)}" height="{fmt_num(rect_h)}"'
                 f'{attr_str}/>'
             )
+            if style_first_row and r == 0:
+                body_parts.append(
+                    f'<line x1="{fmt_num(rect_x)}" y1="{fmt_num(rect_y + rect_h)}" '
+                    f'x2="{fmt_num(rect_x + rect_w)}" y2="{fmt_num(rect_y + rect_h)}" '
+                    f'stroke="#{accent_hex}" stroke-width="1.6"/>'
+                )
 
     # Pass B: cell text. Cell xfrm uses default tcPr insets if none specified.
     for r, row_cells in enumerate(cells):

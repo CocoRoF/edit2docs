@@ -671,12 +671,47 @@ def _is_cjk(ch: str) -> bool:
             0x20000 <= cp <= 0x2A6DF)
 
 
-def _char_width(ch: str, font_size: float, bold: bool) -> float:
+import os as _os
+from functools import lru_cache as _lru_cache
+
+
+@_lru_cache(maxsize=8192)
+def _measured_char_width(ch: str, family: str, font_size: float) -> float | None:
+    """Real advance width from installed fonts (native-render plan M2).
+
+    Measured against the same system fonts resvg rasterizes with, so
+    wrap decisions and pixels agree. ``None`` -> caller's heuristic.
+    Disable with ``E2D_NO_FONT_METRICS=1`` (e.g. golden tests pinned to
+    the old heuristic).
+    """
+    if _os.environ.get("E2D_NO_FONT_METRICS"):
+        return None
+    try:
+        from edit2docs.render.fonts import default_font_resolver
+
+        return default_font_resolver().char_advance(ch, family=family, size=font_size)
+    except Exception:  # noqa: BLE001 - metrics must never break conversion
+        return None
+
+
+def _primary_family(font_family: str) -> str:
+    """First concrete family out of a CSS font stack."""
+    return (font_family or "").split(",")[0].strip().strip("'\"")
+
+
+def _char_width(ch: str, font_size: float, bold: bool, family: str = "") -> float:
     """Estimate a single character's rendered width in pixels.
 
-    Mirrors svg_to_pptx/drawingml_utils.estimate_text_width so wrapping breaks
-    align with the same heuristic used to estimate text-box sizes elsewhere.
+    Prefers measured metrics (fontTools over the fonts resvg will use);
+    falls back to the historical fixed-multiplier estimate that mirrors
+    svg_to_pptx/drawingml_utils.estimate_text_width.
     """
+    if family:
+        measured = _measured_char_width(ch, _primary_family(family), font_size)
+        if measured is not None:
+            if bold and not _is_cjk(ch):
+                measured *= 1.03  # regular-face metrics; bold Latin is wider
+            return measured
     if _is_cjk(ch):
         w = font_size  # CJK is approximately 1em per glyph
     elif ch == ' ':
@@ -697,7 +732,9 @@ def _char_width(ch: str, font_size: float, bold: bool) -> float:
 
 
 def _estimate_run_width(text: str, run: TextRun) -> float:
-    return sum(_char_width(c, run.font_size_px, run.bold) for c in text) * 1.05
+    return sum(
+        _char_width(c, run.font_size_px, run.bold, run.font_family) for c in text
+    ) * 1.05
 
 
 def _find_break_point(
@@ -715,7 +752,7 @@ def _find_break_point(
 
     for i in range(start, len(text)):
         ch = text[i]
-        ch_w = _char_width(ch, run.font_size_px, run.bold)
+        ch_w = _char_width(ch, run.font_size_px, run.bold, run.font_family)
         if cur_w + ch_w > max_width:
             if last_break > start:
                 return last_break, last_break_w

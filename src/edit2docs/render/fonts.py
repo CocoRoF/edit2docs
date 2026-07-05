@@ -194,6 +194,37 @@ class FontResolver:
                 return hit
         return None
 
+    def char_advance(
+        self, ch: str, *, family: Optional[str], size: float
+    ) -> Optional[float]:
+        """Measured advance width of one character, or ``None`` when no
+        installed face covers it (callers keep their own heuristics)."""
+        for fam in self._candidates(family):
+            hit = self.families.get(fam)
+            if not hit:
+                continue
+            metrics = self._metrics.get(hit)
+            if metrics is None:
+                metrics = self._metrics[hit] = _FontMetrics(*hit)
+            width = metrics.width(ch, size)
+            if width is not None:
+                return width
+        return None
+
+    def _candidates(self, family: Optional[str]) -> List[str]:
+        out: List[str] = []
+        if family:
+            fam = family.strip().lower()
+            out.append(_ALIASES.get(fam, fam))
+        out.extend(_FALLBACK_FAMILIES)
+        seen: set = set()
+        uniq = []
+        for f in out:
+            if f not in seen:
+                seen.add(f)
+                uniq.append(f)
+        return uniq
+
     # ── metrics ──────────────────────────────────────────────
 
     def text_width(self, text: str, *, family: Optional[str] = None, size: float) -> float:

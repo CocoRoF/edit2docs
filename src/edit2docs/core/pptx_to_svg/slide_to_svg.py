@@ -562,7 +562,7 @@ def _convert_graphic_fallback(node: ShapeNode, ctx: AssemblyContext,
     - ``...presentationml/2006/ole`` → render the ``mc:Fallback`` preview
       bitmap that PowerPoint bakes alongside every embedded OLE object.
       Visually identical to what PowerPoint shows for an unedited embed.
-    - everything else (chart / SmartArt / diagram) → labelled bounding
+    - ``...drawingml/2006/chart`` → native chart renderer (chart_to_svg)\n    - everything else (SmartArt / diagram) → labelled bounding
       rectangle so the slide composition is preserved even though the inner
       content can't be drawn yet.
     """
@@ -571,6 +571,16 @@ def _convert_graphic_fallback(node: ShapeNode, ctx: AssemblyContext,
 
     if uri == "http://schemas.openxmlformats.org/drawingml/2006/table":
         rendered = _render_graphic_table(node, ctx, graphic_data)
+        if rendered:
+            return _wrap_shape_group(rendered, node, ctx, top_level=top_level)
+
+    if uri == "http://schemas.openxmlformats.org/drawingml/2006/chart":
+        rendered = _render_graphic_chart(node, ctx, graphic_data)
+        if rendered:
+            return _wrap_shape_group(rendered, node, ctx, top_level=top_level)
+
+    if uri == "http://schemas.openxmlformats.org/drawingml/2006/diagram":
+        rendered = _render_graphic_diagram(node, ctx, graphic_data)
         if rendered:
             return _wrap_shape_group(rendered, node, ctx, top_level=top_level)
 
@@ -607,6 +617,141 @@ def _graphic_preview_label(node: ShapeNode, label: str) -> str:
         f'<text x="{fmt_num(node.xfrm.x + 6)}" y="{fmt_num(node.xfrm.y + 15)}" '
         f'font-size="11" fill="#666666">[{_xml_escape(label)}]</text>'
     )
+
+
+def _render_graphic_chart(node: ShapeNode, ctx: AssemblyContext,
+                          graphic_data: ET.Element | None) -> str:
+    """Render an embedded chart natively (native-render plan M2).
+
+    Resolves the chart part through the slide's rels and hands the
+    chartSpace XML to chart_to_svg. Any failure — unreadable part,
+    unsupported plot type, malformed data — returns '' so the caller
+    falls back to the baked preview / dashed placeholder exactly as
+    before.
+    """
+    if graphic_data is None:
+        return ""
+    try:
+        chart_ref = graphic_data.find(
+            "{http://schemas.openxmlformats.org/drawingml/2006/chart}chart"
+        )
+        if chart_ref is None:
+            return ""
+        rid = chart_ref.attrib.get(
+            "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+        )
+        if not rid:
+            return ""
+        part_path = ctx.slide_part.resolve_rel(rid)
+        if not part_path:
+            return ""
+        part = ctx.pkg._load_part(part_path)  # noqa: SLF001 — loader-internal cache
+        if part is None or part.xml is None:
+            return ""
+        from .chart_to_svg import convert_chart
+
+        result = convert_chart(
+            part.xml, node.xfrm.x, node.xfrm.y, node.xfrm.w, node.xfrm.h,
+            ctx.palette, id_prefix=f"chart{ctx.shape_seq[0]}",
+        )
+        if result.defs:
+            ctx.defs.extend(result.defs)
+        return result.svg
+    except Exception:  # noqa: BLE001 — chart render must never kill the slide
+        return ""
+
+
+def _render_graphic_diagram(node: ShapeNode, ctx: AssemblyContext,
+                            graphic_data: ET.Element | None) -> str:
+    """SmartArt → basic auto-layout (native-render plan M2d).
+
+    Pixel-faithful SmartArt is out of scope (the layout algorithms live
+    in a separate spec); instead of the dashed placeholder we extract
+    the diagram's node texts from its data part and lay them out as a
+    grid of rounded accent boxes. Content survives, geometry is ours.
+    Any parse failure returns '' → baked preview / placeholder path.
+    """
+    if graphic_data is None:
+        return ""
+    try:
+        DGM = "http://schemas.openxmlformats.org/drawingml/2006/diagram"
+        R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        A = "http://schemas.openxmlformats.org/drawingml/2006/main"
+        rel_ids = graphic_data.find(f"{{{DGM}}}relIds")
+        if rel_ids is None:
+            return ""
+        rid = rel_ids.attrib.get(f"{{{R}}}dm")
+        if not rid:
+            return ""
+        part_path = ctx.slide_part.resolve_rel(rid)
+        part = ctx.pkg._load_part(part_path) if part_path else None  # noqa: SLF001
+        if part is None or part.xml is None:
+            return ""
+        texts: list[str] = []
+        for pt in part.xml.findall(f".//{{{DGM}}}ptLst/{{{DGM}}}pt"):
+            if pt.attrib.get("type") not in (None, "node"):
+                continue
+            text = " ".join(
+                t.text or "" for t in pt.findall(f".//{{{A}}}t")
+            ).strip()
+            if text:
+                texts.append(text)
+        if not texts:
+            return ""
+        texts = texts[:12]  # keep dense diagrams readable
+
+        import math as _math
+
+        n = len(texts)
+        cols = n if n <= 3 else _math.ceil(_math.sqrt(n))
+        rows = _math.ceil(n / cols)
+        gap = 8.0
+        bw = (node.xfrm.w - gap * (cols + 1)) / cols
+        bh = (node.xfrm.h - gap * (rows + 1)) / rows
+        accent = (ctx.palette.resolve_scheme("accent1") if ctx.palette else None) or "4472C4"
+
+        def _tint(hex6: str, frac: float) -> str:
+            r, g, b = (int(hex6[i:i + 2], 16) for i in (0, 2, 4))
+            return "#" + "".join(
+                f"{int(round(ch + (255 - ch) * frac)):02X}" for ch in (r, g, b)
+            )
+
+        font = max(min(bh * 0.28, 14.0), 8.0)
+        max_chars = max(int(bw / (font * 0.62)), 4)
+        parts: list[str] = []
+        for i, text in enumerate(texts):
+            row_i, col_i = divmod(i, cols)
+            bx = node.xfrm.x + gap + col_i * (bw + gap)
+            by = node.xfrm.y + gap + row_i * (bh + gap)
+            parts.append(
+                f'<rect x="{fmt_num(bx)}" y="{fmt_num(by)}" width="{fmt_num(bw)}" '
+                f'height="{fmt_num(bh)}" rx="{fmt_num(min(bw, bh) * 0.08)}" '
+                f'fill="{_tint(accent, 0.72)}" stroke="#{accent}" stroke-width="1"/>'
+            )
+            # naive centered wrap, up to 3 lines
+            words = text.split()
+            lines: list[str] = [""]
+            for word in words:
+                cand = (lines[-1] + " " + word).strip()
+                if len(cand) <= max_chars or not lines[-1]:
+                    lines[-1] = cand
+                else:
+                    lines.append(word)
+            if len(lines) > 3:
+                lines = lines[:3]
+                lines[-1] = lines[-1][: max(max_chars - 1, 1)] + "…"
+            total_h = len(lines) * font * 1.25
+            ty = by + (bh - total_h) / 2 + font
+            for line in lines:
+                parts.append(
+                    f'<text x="{fmt_num(bx + bw / 2)}" y="{fmt_num(ty)}" '
+                    f'text-anchor="middle" font-size="{fmt_num(font)}" '
+                    f'fill="#333333">{_xml_escape(line)}</text>'
+                )
+                ty += font * 1.25
+        return "\n".join(parts)
+    except Exception:  # noqa: BLE001 — diagram render must never kill the slide
+        return ""
 
 
 def _render_graphic_table(node: ShapeNode, ctx: AssemblyContext,
