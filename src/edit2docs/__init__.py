@@ -19,7 +19,7 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 _LAZY: dict[str, str] = {
     # Unified, extension-dispatched verbs (docx / xlsx / pptx)
@@ -28,6 +28,8 @@ _LAZY: dict[str, str] = {
     "preview_doc": ".simple",
     "set_doc_text": ".simple",
     "analyze_doc": ".simple",
+    "render_doc": ".simple",
+    "RenderResult": ".simple",
     "async_generate_doc": ".simple",
     "async_edit_doc": ".simple",
     # PPTX-specific surface (full deck pipeline)

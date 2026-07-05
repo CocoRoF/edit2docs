@@ -80,6 +80,16 @@ class TextEditsResult:
     results: list[dict] = field(default_factory=list)
 
 
+@dataclass
+class RenderResult:
+    """Output of :func:`render_doc` — files written to disk."""
+
+    paths: list[Path]
+    page_count: int
+    format: str  # source document format ("pptx" | "docx" | "xlsx")
+    to: str  # "png" | "pdf" | "svg"
+
+
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
@@ -437,6 +447,71 @@ def _fmt_of(path: str | Path) -> str:
             f"(supported: {', '.join('.' + f for f in _DOC_FORMATS)})"
         )
     return suffix
+
+
+def render_doc(
+    doc: str | Path,
+    *,
+    to: str = "png",
+    out_dir: str | Path | None = None,
+    dpi: float = 144.0,
+) -> RenderResult:
+    """Render a document to page images or a PDF — no LibreOffice.
+
+    Native raster pipeline (docs/native-render-plan.md): per-page SVG →
+    resvg PNG → (for ``to="pdf"``) PyMuPDF assembly. Deterministic, no
+    LLM, no subprocess.
+
+    Args:
+        doc: Source document. M1 supports ``.pptx`` end-to-end; ``.docx``
+            / ``.xlsx`` raise until their page engines land (M3/M4) —
+            use :func:`preview_doc` for their HTML previews meanwhile.
+        to: ``"png"`` (page-1.png … page-N.png, pdftoppm-compatible
+            naming), ``"pdf"`` (single ``<stem>.pdf``), or ``"svg"``
+            (page-1.svg … — the raw vector pages).
+        out_dir: Output directory (default ``<doc dir>/render``).
+        dpi: Raster resolution for png/pdf (SVG px are 96/inch).
+
+    Returns:
+        :class:`RenderResult` with the written file paths.
+    """
+    fmt = _fmt_of(doc)
+    to = (to or "png").strip().lower()
+    if to not in ("png", "pdf", "svg"):
+        raise ValueError(f"Unsupported render target: {to!r} (use png / pdf / svg)")
+    if fmt != "pptx":
+        raise ValueError(
+            f".{fmt} page rendering is not available yet (native-render plan "
+            "M3/M4) — use preview_doc() for its HTML preview. "
+            f".{fmt} 페이지 렌더링은 아직 미지원입니다 — preview_doc()의 HTML "
+            "프리뷰를 사용하세요."
+        )
+
+    src = Path(doc)
+    out = Path(out_dir) if out_dir is not None else src.parent / "render"
+    out.mkdir(parents=True, exist_ok=True)
+
+    svgs = preview_pptx(src)  # list[str] — per-slide self-contained SVG
+
+    from .render import svgs_to_pdf, svgs_to_pngs
+
+    if to == "svg":
+        for old in out.glob("page-*.svg"):
+            old.unlink(missing_ok=True)
+        paths: list[Path] = []
+        for i, svg in enumerate(svgs, 1):
+            p = out / f"page-{i}.svg"
+            p.write_text(svg, encoding="utf-8")
+            paths.append(p)
+        return RenderResult(paths=paths, page_count=len(paths), format=fmt, to=to)
+
+    if to == "png":
+        paths = svgs_to_pngs(svgs, out, dpi=dpi)
+        return RenderResult(paths=paths, page_count=len(paths), format=fmt, to=to)
+
+    pdf_path = out / f"{src.stem}.pdf"
+    pdf_path.write_bytes(svgs_to_pdf(svgs, dpi=dpi))
+    return RenderResult(paths=[pdf_path], page_count=len(svgs), format=fmt, to=to)
 
 
 async def _sources_markdown(sources: list[str | Path] | None) -> list[str]:

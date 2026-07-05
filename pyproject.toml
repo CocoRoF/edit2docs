@@ -1,6 +1,6 @@
 [project]
 name = "edit2docs"
-version = "0.4.0"
+version = "0.5.0"
 description = "AI-agent-native document engine: generate and chat-edit DOCX, XLSX and PPTX as a Python library, agent tool set, MCP server or hosted service. Korean-first. Sister project of edit2ppt."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -43,6 +43,10 @@ dependencies = [
     "anthropic>=0.40.0",
     # MCP (Model Context Protocol) — powers the zero-infra `edit2docs-mcp`
     "mcp>=1.0.0",
+    # Native raster layer (docs/native-render-plan.md M1) — both are
+    # self-contained wheels: resvg for SVG->PNG, fontTools for metrics.
+    "resvg-py>=0.3.3",
+    "fonttools>=4.50.0",
 ]
 
 [project.optional-dependencies]
