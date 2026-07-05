@@ -382,11 +382,13 @@ def xlsx_preview(content: bytes, *, max_rows: int = 200) -> tuple[str, list[dict
                         if cached is not None:
                             value = cached
                 css_class = ""
-                if isinstance(value, (int, float)):
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
                     css_class = ' class="e2d-num"'
-                    if isinstance(value, float) and value.is_integer():
-                        value = int(value)
-                text = escape("" if value is None else str(value))
+                # M4: honour the cell's Excel number format (currency,
+                # percent, thousands, dates) instead of raw repr.
+                from edit2docs.documents.number_format import format_cell_value
+
+                text = escape(format_cell_value(value, cell.number_format))
                 tag = "th" if cell.row <= header_rows else "td"
                 cells_html.append(
                     f'<{tag} data-e2d-cell="{cell.coordinate}"'
