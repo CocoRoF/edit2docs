@@ -284,7 +284,9 @@ def write_slide_part_from_svg(
     media_dir = extract_dir / "ppt" / "media"
     media_dir.mkdir(exist_ok=True)
 
-    slide_xml, media_files_dict, rel_entries, _anim_targets = (
+    # Appended slides never enable native_objects, so the trailing
+    # package_files / content_type_overrides registries stay empty here.
+    slide_xml, media_files_dict, rel_entries, _anim_targets, _pkg, _cto = (
         convert_svg_to_slide_shapes(svg_path, slide_num=slide_num, verbose=verbose)
     )
 

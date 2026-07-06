@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from xml.etree import ElementTree as ET
 from dataclasses import dataclass, field
 
@@ -40,6 +41,8 @@ class ConvertContext:
     filter_id: str | None = None
     media_files: dict[str, bytes] = field(default_factory=dict)
     rel_entries: list[dict[str, str]] = field(default_factory=list)
+    package_files: dict[str, bytes] = field(default_factory=dict)
+    content_type_overrides: dict[str, str] = field(default_factory=dict)
     rel_id_counter: int = 2  # rId1 reserved for slideLayout
     svg_dir: Path | None = None
     # Native PPTX image optimization. Keeps generated decks compact by
@@ -58,6 +61,12 @@ class ConvertContext:
     # Default-on flag: merge mergeable paragraph blocks into one editable
     # text frame with multiple <a:p>. Disable it for strict line fidelity.
     merge_paragraphs: bool = True
+    # Explicit opt-in: convert data-pptx-native table/chart marker groups to
+    # native PowerPoint graphicFrames. Default stays off to preserve SVG output.
+    native_objects_enabled: bool = False
+    # Optional per-element conversion diagnostics. Shared by child contexts so
+    # callers can inspect native / skipped / unsupported decisions per slide.
+    trace_events: list[dict[str, Any]] | None = None
 
     def next_id(self) -> int:
         """Allocate the next shape ID."""
@@ -153,6 +162,8 @@ class ConvertContext:
             filter_id=filter_id or self.filter_id,
             media_files=self.media_files,
             rel_entries=self.rel_entries,
+            package_files=self.package_files,
+            content_type_overrides=self.content_type_overrides,
             rel_id_counter=self.rel_id_counter,
             svg_dir=self.svg_dir,
             image_optimize=self.image_optimize,
@@ -165,6 +176,8 @@ class ConvertContext:
             # anim_targets is intentionally a fresh list on the child;
             # only the root-level context's list is read by the builder.
             merge_paragraphs=self.merge_paragraphs,
+            native_objects_enabled=self.native_objects_enabled,
+            trace_events=self.trace_events,
         )
 
     def sync_from_child(self, child_ctx: ConvertContext) -> None:
