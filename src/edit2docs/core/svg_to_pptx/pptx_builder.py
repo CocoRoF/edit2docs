@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import mimetypes
+import os
 import re
+import posixpath
 import shutil
+import stat
+import subprocess
 import tempfile
+import uuid
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -26,7 +31,10 @@ from .pptx_media import (
 )
 from .pptx_notes import (
     markdown_to_plain_text,
-    create_notes_slide_xml, create_notes_slide_rels_xml,
+    create_notes_master_rels_xml,
+    create_notes_master_xml,
+    create_notes_slide_xml,
+    create_notes_slide_rels_xml,
 )
 from .pptx_narration import (
     AUDIO_CONTENT_TYPES,
@@ -82,12 +90,33 @@ def _append_relationship(
     return next_rid
 
 
+def _find_relationship_id(
+    rels_path: Path,
+    rel_type: str,
+    target: str,
+) -> str | None:
+    """Find an existing relationship id by type and target."""
+    if not rels_path.exists():
+        return None
+    rels_content = rels_path.read_text(encoding='utf-8')
+    pattern = (
+        r'<Relationship\b[^>]*\bId="([^"]+)"[^>]*'
+        rf'\bType="{re.escape(rel_type)}"[^>]*'
+        rf'\bTarget="{re.escape(target)}"[^>]*/>'
+    )
+    match = re.search(pattern, rels_content)
+    return match.group(1) if match else None
+
+
 def _add_default_content_type(content_types: str, extension: str, content_type: str) -> str:
     """Add a Default content type if it is not already present."""
     ext = extension.lstrip(".")
     if f'Extension="{ext}"' in content_types:
         return content_types
     entry = f'  <Default Extension="{ext}" ContentType="{content_type}"/>'
+    override_pos = content_types.find('<Override ')
+    if override_pos >= 0:
+        return content_types[:override_pos] + entry + '\n' + content_types[override_pos:]
     return content_types.replace('</Types>', entry + '\n</Types>')
 
 
@@ -116,6 +145,154 @@ def _content_type_for_extension(ext: str) -> str:
 
 def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _relax_output_permissions(output_path: Path) -> list[str]:
+    """Make exported files readable outside the sandbox owner where possible."""
+    warnings: list[str] = []
+
+    try:
+        current_mode = output_path.stat().st_mode
+        readable_mode = (
+            current_mode
+            | stat.S_IRUSR
+            | stat.S_IWUSR
+            | stat.S_IRGRP
+            | stat.S_IROTH
+        )
+        os.chmod(output_path, readable_mode)
+    except OSError as exc:
+        warnings.append(f"chmod skipped for {output_path}: {exc}")
+
+    if os.name != 'nt':
+        return warnings
+
+    # Windows ACLs can remain sandbox-only even when the file mode looks sane.
+    # Grant the built-in Users SID read access; the SID avoids localization
+    # issues on non-English Windows installations.
+    try:
+        result = subprocess.run(
+            ['icacls', str(output_path), '/grant', '*S-1-5-32-545:R'],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        warnings.append(f"icacls skipped for {output_path}: {exc}")
+    else:
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or '').strip()
+            details = f": {message}" if message else ''
+            warnings.append(f"icacls failed for {output_path}{details}")
+
+    return warnings
+
+
+_NOTES_MASTER_REL_TYPE = (
+    'http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster'
+)
+
+
+def _ensure_notes_master(extract_dir: Path) -> None:
+    """Create notesMaster parts and wire them into the presentation package."""
+    ppt_dir = extract_dir / 'ppt'
+    notes_masters_dir = ppt_dir / 'notesMasters'
+    notes_masters_dir.mkdir(exist_ok=True)
+
+    notes_master_path = notes_masters_dir / 'notesMaster1.xml'
+    if not notes_master_path.exists():
+        notes_master_path.write_text(create_notes_master_xml(), encoding='utf-8')
+
+    theme_dir = ppt_dir / 'theme'
+    theme_dir.mkdir(exist_ok=True)
+    theme1_path = theme_dir / 'theme1.xml'
+    theme2_path = theme_dir / 'theme2.xml'
+    if not theme2_path.exists():
+        if theme1_path.exists():
+            shutil.copy2(theme1_path, theme2_path)
+        else:
+            raise RuntimeError('Cannot create notes theme: ppt/theme/theme1.xml is missing')
+
+    notes_master_rels_dir = notes_masters_dir / '_rels'
+    notes_master_rels_dir.mkdir(exist_ok=True)
+    notes_master_rels_path = notes_master_rels_dir / 'notesMaster1.xml.rels'
+    if not notes_master_rels_path.exists():
+        notes_master_rels_path.write_text(
+            create_notes_master_rels_xml(),
+            encoding='utf-8',
+        )
+
+    presentation_rels_path = ppt_dir / '_rels' / 'presentation.xml.rels'
+    notes_master_rid = _find_relationship_id(
+        presentation_rels_path,
+        _NOTES_MASTER_REL_TYPE,
+        'notesMasters/notesMaster1.xml',
+    )
+    if notes_master_rid is None:
+        notes_master_rid = _append_relationship(
+            presentation_rels_path,
+            _NOTES_MASTER_REL_TYPE,
+            'notesMasters/notesMaster1.xml',
+        )
+
+    presentation_path = ppt_dir / 'presentation.xml'
+    presentation_xml = presentation_path.read_text(encoding='utf-8')
+    if '<p:notesMasterIdLst>' in presentation_xml:
+        return
+    notes_master_lst = (
+        f'<p:notesMasterIdLst><p:notesMasterId r:id="{notes_master_rid}"/>'
+        '</p:notesMasterIdLst>'
+    )
+    if '</p:sldMasterIdLst>' not in presentation_xml:
+        raise RuntimeError('presentation.xml is missing p:sldMasterIdLst')
+    presentation_xml = presentation_xml.replace(
+        '</p:sldMasterIdLst>',
+        '</p:sldMasterIdLst>' + notes_master_lst,
+        1,
+    )
+    presentation_path.write_text(presentation_xml, encoding='utf-8')
+
+
+def _create_writable_work_dir(output_path: Path) -> Path:
+    """Create a real writable work directory for PPTX assembly."""
+    parents = [output_path.parent, Path.cwd(), Path(tempfile.gettempdir())]
+    seen: set[str] = set()
+    errors: list[str] = []
+
+    for parent in parents:
+        parent = parent if str(parent) else Path(".")
+        try:
+            key = str(parent.resolve())
+        except OSError:
+            key = str(parent.absolute())
+        if key in seen:
+            continue
+        seen.add(key)
+
+        try:
+            parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            errors.append(f"{parent}: cannot create parent ({exc})")
+            continue
+
+        for _ in range(3):
+            work_dir = parent / f".pptx-build-{os.getpid()}-{uuid.uuid4().hex}"
+            try:
+                work_dir.mkdir(mode=0o700)
+                probe_path = work_dir / ".write-probe"
+                probe_path.write_text("ok", encoding="utf-8")
+                probe_path.unlink()
+                return work_dir
+            except OSError as exc:
+                errors.append(f"{work_dir}: {exc}")
+                shutil.rmtree(work_dir, ignore_errors=True)
+
+    details = "\n  - ".join(errors) if errors else "no candidate directories available"
+    raise PermissionError(
+        "Unable to create a writable PPTX work directory. "
+        "Set the output path to a writable project directory or adjust sandbox permissions. "
+        f"Tried:\n  - {details}"
+    )
 
 
 def _to_float(value: Any, default: float) -> float:
@@ -285,6 +462,40 @@ def _placeholder_slide_xml(
     return placeholder_xml, {}, [], []
 
 
+_REL_TARGET_RE = re.compile(r'<Relationship\b[^/]*?/>', re.DOTALL)
+_TARGET_ATTR_RE = re.compile(r'Target="([^"]+)"')
+_TARGET_MODE_EXT_RE = re.compile(r'TargetMode="External"')
+
+
+def _verify_internal_rels_targets(extract_dir: Path) -> list[str]:
+    """Return a list of dangling internal Targets across every .rels in the package.
+
+    Each entry is formatted as "<rels-path> -> <missing-target>". An empty list
+    means every internal Target resolves to a real file in the package.
+    """
+    problems: list[str] = []
+    for rels_path in extract_dir.rglob('*.rels'):
+        rels_rel = rels_path.relative_to(extract_dir).as_posix()
+        # `_rels/foo.xml.rels` lives one level below its referent's directory;
+        # Targets resolve relative to the parent of that `_rels` folder.
+        base_dir = posixpath.dirname(posixpath.dirname(rels_rel))
+        content = rels_path.read_text(encoding='utf-8')
+        for match in _REL_TARGET_RE.finditer(content):
+            element = match.group(0)
+            if _TARGET_MODE_EXT_RE.search(element):
+                continue
+            target_match = _TARGET_ATTR_RE.search(element)
+            if not target_match:
+                continue
+            target = target_match.group(1)
+            if target.startswith(('http://', 'https://', 'mailto:')):
+                continue
+            resolved = posixpath.normpath(posixpath.join(base_dir, target)) if base_dir else posixpath.normpath(target)
+            if not (extract_dir / resolved).exists():
+                problems.append(f'{rels_rel} -> {resolved}')
+    return problems
+
+
 def create_pptx_with_native_svg(
     svg_files: list[Path],
     output_path: Path,
@@ -416,7 +627,7 @@ def create_pptx_with_native_svg(
 
     animation_cli_overrides = animation_cli_overrides or {}
 
-    temp_dir = Path(tempfile.mkdtemp())
+    temp_dir = _create_writable_work_dir(output_path)
 
     try:
         # Create base PPTX with python-pptx
@@ -664,6 +875,8 @@ def create_pptx_with_native_svg(
                     notes_content = notes.get(svg_stem, '') if notes else ''
                     notes_text = markdown_to_plain_text(notes_content) if notes_content else ''
                     if notes_text:
+                        _ensure_notes_master(extract_dir)
+
                         notes_slides_dir = extract_dir / 'ppt' / 'notesSlides'
                         notes_slides_dir.mkdir(exist_ok=True)
 
@@ -772,22 +985,16 @@ def create_pptx_with_native_svg(
         with open(content_types_path, 'r', encoding='utf-8') as f:
             content_types = f.read()
 
-        types_to_add: list[str] = []
         if not use_native_shapes:
-            if 'Extension="svg"' not in content_types:
-                types_to_add.append('  <Default Extension="svg" ContentType="image/svg+xml"/>')
+            content_types = _add_default_content_type(content_types, 'svg', 'image/svg+xml')
         for ext in sorted(image_exts_used):
-            if f'Extension="{ext}"' not in content_types:
-                types_to_add.append(
-                    f'  <Default Extension="{ext}" ContentType="{_content_type_for_extension(ext)}"/>'
-                )
-
-        if types_to_add:
-            content_types = content_types.replace(
-                '</Types>', '\n'.join(types_to_add) + '\n</Types>',
+            content_types = _add_default_content_type(
+                content_types,
+                ext,
+                _content_type_for_extension(ext),
             )
-            with open(content_types_path, 'w', encoding='utf-8') as f:
-                f.write(content_types)
+        with open(content_types_path, 'w', encoding='utf-8') as f:
+            f.write(content_types)
 
         if audio_exts_used:
             for ext in sorted(audio_exts_used):
@@ -799,8 +1006,26 @@ def create_pptx_with_native_svg(
             with open(content_types_path, 'w', encoding='utf-8') as f:
                 f.write(content_types)
 
-        # Add notesSlides content types
+        # Add notes master / slides content types
         if enable_notes and notes_slides_created:
+            notes_theme_override = (
+                '  <Override PartName="/ppt/theme/theme2.xml" '
+                'ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>'
+            )
+            if notes_theme_override not in content_types:
+                content_types = content_types.replace(
+                    '</Types>',
+                    notes_theme_override + '\n</Types>',
+                )
+            notes_master_override = (
+                '  <Override PartName="/ppt/notesMasters/notesMaster1.xml" '
+                'ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml"/>'
+            )
+            if notes_master_override not in content_types:
+                content_types = content_types.replace(
+                    '</Types>',
+                    notes_master_override + '\n</Types>',
+                )
             for i in sorted(notes_slides_created):
                 override = (
                     f'  <Override PartName="/ppt/notesSlides/notesSlide{i}.xml" '
@@ -811,6 +1036,14 @@ def create_pptx_with_native_svg(
             with open(content_types_path, 'w', encoding='utf-8') as f:
                 f.write(content_types)
 
+        rels_problems = _verify_internal_rels_targets(extract_dir)
+        if rels_problems:
+            details = '\n'.join(f'  - {p}' for p in rels_problems)
+            raise RuntimeError(
+                'PPTX package contains dangling internal relationship targets; '
+                'PowerPoint will report the file as corrupt:\n' + details
+            )
+
         # Repackage PPTX to a temporary file first. The public output path is
         # replaced only after every slide and relationship has succeeded.
         temp_output_path = temp_dir / 'result.pptx'
@@ -820,10 +1053,13 @@ def create_pptx_with_native_svg(
                     arcname = file_path.relative_to(extract_dir)
                     zf.write(file_path, arcname)
         shutil.move(str(temp_output_path), str(output_path))
+        permission_warnings = _relax_output_permissions(output_path)
 
         if verbose:
             print()
             print(f"[Done] Saved: {output_path}")
+            for warning in permission_warnings:
+                print(f"  [warn] {warning}")
             print(f"  Succeeded: {success_count}, Failed: {len(svg_files) - success_count}")
             if use_compat_mode and has_any_image:
                 print(f"  Mode: Office compatibility mode (supports all Office versions)")

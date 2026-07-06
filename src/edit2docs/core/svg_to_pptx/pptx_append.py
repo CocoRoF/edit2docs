@@ -35,6 +35,7 @@ from .pptx_builder import (
     _add_default_content_type,
     _append_relationship,
     _content_type_for_extension,
+    _ensure_notes_master,
 )
 from .pptx_notes import create_notes_slide_rels_xml, create_notes_slide_xml
 
@@ -142,16 +143,33 @@ def append_svg_slides_to_pptx(
         ).exists()
         notes = notes or {}
         if enable_notes and notes and not has_notes_master:
-            warnings.append(
-                {
-                    "code": "template_notes_skipped_no_notes_master",
-                    "message": (
-                        "Host deck has no notesMaster part; speaker notes were "
-                        "not embedded. 템플릿에 노트 마스터가 없어 발표자 노트를 "
-                        "생략했습니다."
-                    ),
-                }
-            )
+            # Upstream f43e8644/767332d1 taught the builder to materialize a
+            # PowerPoint-compatible notesMaster (+ notes theme) on demand.
+            # Do the same here instead of silently dropping the speaker notes.
+            try:
+                _ensure_notes_master(extract_dir)
+                _add_override(
+                    content_types_path,
+                    "/ppt/notesMasters/notesMaster1.xml",
+                    "application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml",
+                )
+                _add_override(
+                    content_types_path,
+                    "/ppt/theme/theme2.xml",
+                    "application/vnd.openxmlformats-officedocument.theme+xml",
+                )
+                has_notes_master = True
+            except Exception:
+                warnings.append(
+                    {
+                        "code": "template_notes_skipped_no_notes_master",
+                        "message": (
+                            "Host deck has no notesMaster part and one could not "
+                            "be created; speaker notes were not embedded. 템플릿에 "
+                            "노트 마스터가 없어 발표자 노트를 생략했습니다."
+                        ),
+                    }
+                )
 
         media_cache: dict[tuple[str, str], str] = {}
         image_exts_used: set[str] = set()

@@ -93,9 +93,11 @@ class TestExtendMode:
         )
         with zipfile.ZipFile(out) as zf:
             names = zf.namelist()
-            has_notes_master = any(n.startswith("ppt/notesMasters/") for n in names)
-            if not has_notes_master:
-                pytest.skip("python-pptx default template has no notesMaster")
+            # Since the notesMaster port (upstream f43e8644/767332d1) the
+            # appender materializes a notesMaster on demand, so notes must be
+            # embedded even when the host template ships none.
+            assert "ppt/notesMasters/notesMaster1.xml" in names
+            assert "ppt/theme/theme2.xml" in names
             notes_parts = [
                 n
                 for n in names
