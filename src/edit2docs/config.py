@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     port: int = 8000
 
     # Default language for new projects when none is specified
-    default_lang: str = "ko-KR"
+    default_lang: str = "en-US"
 
     # Standalone data root. SQLite db + local-fs storage live here when no
     # external Postgres / S3 is configured. Must be writable by the engine

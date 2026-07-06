@@ -27,6 +27,7 @@ from ...services.assets import (
     get_asset,
     upload_asset,
 )
+from ..errors import bilingual_detail
 from ..dependencies import Catalog, CurrentTenant, DbSession, RequestLocale, Storage
 
 router = APIRouter(prefix="/v1/assets", tags=["assets"])
@@ -95,6 +96,7 @@ async def upload(
     tenant: CurrentTenant,
     session: DbSession,
     storage: Storage,
+    locale: RequestLocale,
     file: Annotated[UploadFile, File(description="File contents")],
     kind: Annotated[AssetKind, Form(description="Asset kind (default: source)")] = AssetKind.source,
     project_id: Annotated[uuid.UUID | None, Form()] = None,
@@ -110,11 +112,12 @@ async def upload(
         # client before we touch storage.
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail={
-                "code": "SOURCE_TOO_LARGE",
-                "message": "업로드 파일이 제한을 초과했습니다.",
-                "message_en": "Upload exceeds size limit.",
-            },
+            detail=bilingual_detail(
+                "SOURCE_TOO_LARGE",
+                en="Upload exceeds size limit.",
+                ko="업로드 파일이 제한을 초과했습니다.",
+                locale=locale,
+            ),
         )
     result: UploadResult = await upload_asset(
         session=session,

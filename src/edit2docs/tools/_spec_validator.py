@@ -163,8 +163,9 @@ def _check_page_zones(
             ValidationWarning(
                 code="spec_validator_page_zones",
                 message=(
-                    f"{len(offenders)} 개의 page_zones 항목에 문제가 있습니다 — "
-                    "off-canvas, page_number 너비 부족, title/chapter y 범위 겹침 중 하나."
+                    f"{len(offenders)} page_zones entries have problems — "
+                    "off-canvas, page_number too narrow, or title/chapter y-range "
+                    f"overlap. (page_zones 항목 {len(offenders)}개 문제)"
                 ),
                 detail={"offenders": offenders[:10]},
             )
@@ -217,7 +218,10 @@ def _normalise_hex_colors(
         warnings.append(
             ValidationWarning(
                 code="spec_validator_hex_normalised",
-                message=f"{fixes} 개의 색상을 표준 6자리 HEX 로 정규화했습니다.",
+                message=(
+                    f"Normalized {fixes} color(s) to standard 6-digit HEX. "
+                    f"({fixes}개 색상 정규화)"
+                ),
                 detail={"fixes": fixes},
             )
         )
@@ -281,8 +285,8 @@ def _resolve_icons(
             ValidationWarning(
                 code="spec_validator_icon_substituted",
                 message=(
-                    f"{len(swaps)} 개의 아이콘 이름을 라이브러리에 실재하는 가장 가까운 "
-                    "이름으로 자동 교체했습니다."
+                    f"Auto-replaced {len(swaps)} icon name(s) with the closest "
+                    f"existing library icons. (아이콘 {len(swaps)}개 자동 교체)"
                 ),
                 detail={"substitutions": swaps},
             )
@@ -292,8 +296,8 @@ def _resolve_icons(
             ValidationWarning(
                 code="spec_validator_icon_missing",
                 message=(
-                    f"{len(dropped)} 개의 아이콘을 라이브러리에서 찾지 못했습니다 — "
-                    "Executor 단계에서 빈 자리로 처리됩니다."
+                    f"{len(dropped)} icon(s) not found in the library — the "
+                    f"Executor will leave those slots empty. (아이콘 {len(dropped)}개 미발견)"
                 ),
                 detail={"missing": dropped},
             )
@@ -323,8 +327,8 @@ def _check_required_fields(
             ValidationWarning(
                 code="spec_validator_missing_section",
                 message=(
-                    f"spec_lock 의 필수 섹션이 누락됨: {', '.join(missing)} — "
-                    "Executor 가 기본값으로 fallback 합니다."
+                    f"spec_lock is missing required sections: {', '.join(missing)} — "
+                    "the Executor falls back to defaults. (필수 섹션 누락)"
                 ),
                 detail={"missing": missing},
             )
@@ -361,8 +365,9 @@ def _check_windows_safe_font_tails(
             ValidationWarning(
                 code="spec_validator_font_tail_unsafe",
                 message=(
-                    f"{len(offenders)} 개의 폰트 스택이 Windows-safe family 로 끝나지 "
-                    "않습니다 — Pretendard 등이 설치 안 된 환경에서 시스템 폰트로 폴백됩니다."
+                    f"{len(offenders)} font stack(s) do not end with a Windows-safe "
+                    "family — machines without e.g. Pretendard will fall back to a "
+                    f"system font. (폰트 스택 {len(offenders)}개)"
                 ),
                 detail={"stacks": offenders[:5]},
             )

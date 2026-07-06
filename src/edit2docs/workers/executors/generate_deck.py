@@ -54,7 +54,7 @@ async def run_generate_deck(ctx: ExecutionContext) -> None:
     source_asset_ids: list[str] = params.get("source_asset_ids", [])
     user_intent: str = params["user_intent"]
     target_pages = tuple(params.get("target_pages", [8, 12]))  # type: ignore[arg-type]
-    lang: str = params.get("lang", "ko-KR")
+    lang: str = params.get("lang", "en-US")
     style: str = params.get("style", "general")
     template_name: str | None = params.get("template_name")
     template_asset_id: str | None = params.get("template_asset_id")
@@ -270,7 +270,7 @@ async def _run_generate_document(
             intent=params["user_intent"],
             fmt=fmt,  # type: ignore[arg-type]
             sources_markdown=sources_markdown,
-            lang=params.get("lang", "ko-KR"),  # type: ignore[arg-type]
+            lang=params.get("lang", "en-US"),  # type: ignore[arg-type]
             model=params.get("model", "claude-opus-4-7"),
             anthropic_api_key=params["anthropic_api_key"],
         )

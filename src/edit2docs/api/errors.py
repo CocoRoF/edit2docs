@@ -7,7 +7,7 @@ and renders to:
     {
       "error": {
         "code": "ASSET_NOT_FOUND",
-        "message": "자산 ... 를 찾을 수 없거나 만료되었습니다.",
+        "message": "Asset ... was not found or has expired.",   # request locale
         "message_en": "Asset ... was not found or has expired.",
         "details": {...}
       }
@@ -82,12 +82,13 @@ def install_error_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=422,
             content={
-                "error": {
-                    "code": "VALIDATION_ERROR",
-                    "message": "요청을 검증할 수 없습니다.",
-                    "message_en": "Request validation failed.",
-                    "details": {"errors": exc.errors()},
-                }
+                "error": bilingual_detail(
+                    "VALIDATION_ERROR",
+                    en="Request validation failed.",
+                    ko="요청을 검증할 수 없습니다.",
+                    locale=_resolve_locale(request),
+                    details={"errors": exc.errors()},
+                )
             },
         )
 
@@ -106,3 +107,17 @@ def _starlette_code(status_code: int) -> str:
         502: "BAD_GATEWAY",
         503: "SERVICE_UNAVAILABLE",
     }.get(status_code, "HTTP_ERROR")
+
+
+def bilingual_detail(
+    code: str, *, en: str, ko: str, locale: str = "en-US", **extra: Any
+) -> dict[str, Any]:
+    """Inline-route error detail with locale-resolved primary message.
+
+    English-first: ``message`` is English unless the request's
+    Accept-Language resolved to Korean. ``message_en`` (and the additive
+    ``message_ko``) always carry both fixed forms so clients can localize
+    themselves regardless of what ``message`` picked.
+    """
+    message = ko if (locale or "").lower().startswith("ko") else en
+    return {"code": code, "message": message, "message_en": en, "message_ko": ko, **extra}

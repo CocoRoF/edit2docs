@@ -1,4 +1,4 @@
-"""Bilingual message catalog for edit2docs.
+"""Bilingual message catalog for edit2docs (English-first, full Korean).
 
 Loads YAML message files under i18n/messages/ and looks up messages by
 dot-separated key + locale. Used by FastAPI exception handlers and MCP tool
@@ -21,9 +21,10 @@ import yaml
 
 _MESSAGES_DIR = Path(__file__).parent / "messages"
 
-# Default locale + fallback chain. ko-KR is primary; en-US is the universal
-# fallback (every key must exist in en.yaml).
-DEFAULT_LOCALE = "ko-KR"
+# Default locale + fallback chain. English-first: en-US is primary AND the
+# universal fallback (every key must exist in en.yaml); ko.yaml is the
+# complete Korean catalog.
+DEFAULT_LOCALE = "en-US"
 FALLBACK_LOCALE = "en-US"
 
 # Locale code -> YAML filename (without extension)

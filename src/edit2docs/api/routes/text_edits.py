@@ -34,7 +34,8 @@ from ...db.models import Asset, AssetKind, Tenant
 from ...documents import doc_format_of
 from ...storage import get_default_storage
 from ...services.assets import upload_asset
-from ..dependencies import CurrentTenant, DbSession
+from ..errors import bilingual_detail
+from ..dependencies import CurrentTenant, DbSession, RequestLocale
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/text-edits", tags=["text-edits"])
@@ -111,6 +112,7 @@ async def apply_doc_text_edits(
     body: TextEditsBody,
     tenant: CurrentTenant,
     session: DbSession,
+    locale: RequestLocale,
 ) -> TextEditsResponse:
     asset = (
         await session.execute(
@@ -122,11 +124,12 @@ async def apply_doc_text_edits(
     if asset is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "code": "ASSET_NOT_FOUND",
-                "message": f"에셋 {body.pptx_asset_id} 를 찾을 수 없습니다.",
-                "message_en": f"Asset {body.pptx_asset_id} not found.",
-            },
+            detail=bilingual_detail(
+                "ASSET_NOT_FOUND",
+                en=f"Asset {body.pptx_asset_id} not found.",
+                ko=f"에셋 {body.pptx_asset_id} 를 찾을 수 없습니다.",
+                locale=locale,
+            ),
         )
 
     fmt = doc_format_of(asset.original_filename, asset.mime_type) or "pptx"
@@ -137,11 +140,12 @@ async def apply_doc_text_edits(
         # Presigned uploads register the Asset row before the bytes land.
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "code": "ASSET_BYTES_MISSING",
-                "message": "에셋 파일이 아직 업로드되지 않았습니다.",
-                "message_en": "Asset bytes are not uploaded yet.",
-            },
+            detail=bilingual_detail(
+                "ASSET_BYTES_MISSING",
+                en="Asset bytes are not uploaded yet.",
+                ko="에셋 파일이 아직 업로드되지 않았습니다.",
+                locale=locale,
+            ),
         )
     try:
         edits = [e.model_dump() for e in body.edits]

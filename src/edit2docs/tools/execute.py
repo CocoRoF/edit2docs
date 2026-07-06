@@ -367,21 +367,25 @@ def _layout_violation_message(v) -> str:
     if v.kind == "overlap":
         ratio = v.actual.get("overlap_ratio", 0)
         return (
-            f"두 요소가 {int(ratio * 100)}% 겹침; "
-            + ("자동으로 아래로 옮겼습니다." if v.fix_applied else "수정 못 함.")
+            f"Two elements overlap by {int(ratio * 100)}%; "
+            + ("moved the smaller one down automatically." if v.fix_applied
+               else "could not auto-fix.")
         )
     if v.kind == "text_overflow_x":
         required = v.actual.get("required_w")
         actual = v.actual.get("box_w")
         return (
-            f"텍스트가 박스 폭을 초과 (필요 {required}px / 실제 {actual:.0f}px); "
-            + ("박스 폭을 확장했습니다." if v.fix_applied else "박스 폭 그대로.")
+            f"Text exceeds its box width (needs {required}px / box {actual:.0f}px); "
+            + ("widened the box." if v.fix_applied else "box left as-is.")
         )
     if v.kind == "off_canvas":
-        return "요소가 캔버스 밖에 위치 — 안쪽으로 이동시켰습니다." if v.fix_applied else "요소가 캔버스 밖."
+        return (
+            "Element was outside the canvas — moved it inside." if v.fix_applied
+            else "Element is outside the canvas."
+        )
     if v.kind == "empty_decoration":
-        return "빈 장식 요소를 제거했습니다."
-    return f"레이아웃 위반: {v.kind}"
+        return "Removed an empty decorative element."
+    return f"Layout violation: {v.kind}"
 
 
 _RE_HEX = re.compile(r"#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b")

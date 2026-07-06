@@ -38,6 +38,7 @@ from ._workspace import temp_workspace
 from .convert import ConvertRequest, convert_to_markdown
 from .generate_deck import EventCallback, StageEvent, _emit, _merge_cost
 from .render_preview import RenderPreviewRequest, render_preview
+from ._reply_texts import reply_text
 from .types import (
     CostBreakdown,
     DEFAULT_LANG,
@@ -132,7 +133,7 @@ async def edit_deck(
         model=req.model,
     )
     cost = _merge_cost(cost, _cost_from_usage(result.usage))
-    reply, operations, plan_missing = _parse_plan(result.text, warnings)
+    reply, operations, plan_missing = _parse_plan(result.text, warnings, lang=req.lang)
 
     # The model occasionally answers conversationally ("...하겠습니다") and
     # forgets the edit_plan block entirely. Without a retry the user sees a
@@ -153,15 +154,11 @@ async def edit_deck(
             model=req.model,
         )
         cost = _merge_cost(cost, _cost_from_usage(retry_result.usage))
-        reply, operations, plan_missing = _parse_plan(retry_result.text, warnings)
+        reply, operations, plan_missing = _parse_plan(retry_result.text, warnings, lang=req.lang)
         if plan_missing:
             # Be honest in the chat instead of promising changes that never
             # happened (production case: "레이아웃 재구성하겠습니다" + no-op).
-            reply = (
-                reply.rstrip()
-                + "\n\n[주의] 편집 계획 생성에 실패해 변경이 적용되지 않았습니다. "
-                "요청을 조금 더 구체적으로 나눠서 다시 보내주세요."
-            )
+            reply = reply.rstrip() + reply_text("plan_failed", req.lang)
 
     operations = _validate_operations(
         operations, page_count=len(slide_svgs), cap=req.max_operations, warnings=warnings
@@ -170,11 +167,9 @@ async def edit_deck(
         (w for w in warnings if w.code == "edit_plan_truncated"), None
     )
     if truncated is not None and truncated.detail:
-        reply = (
-            reply.rstrip()
-            + f"\n\n[안내] 계획된 작업 {truncated.detail['emitted']}개 중 상한에 따라 "
-            f"앞 {truncated.detail['cap']}개만 이번 턴에 적용합니다. 나머지는 "
-            "같은 요청을 한 번 더 보내면 이어서 처리됩니다."
+        reply = reply.rstrip() + reply_text(
+            "plan_truncated", req.lang,
+            emitted=truncated.detail["emitted"], cap=truncated.detail["cap"],
         )
 
     if not operations:
@@ -195,7 +190,7 @@ async def edit_deck(
     from ._edit_events import op_event_vars, op_summary, plan_event_vars
 
     op_summaries = {
-        id(op): op_summary("pptx", op, index=i, total=len(operations))
+        id(op): op_summary("pptx", op, index=i, total=len(operations), lang=req.lang)
         for i, op in enumerate(operations)
     }
     await _emit(
@@ -204,7 +199,7 @@ async def edit_deck(
             stage="planning_edits",
             progress=0.38,
             message_key="stages.planning_edits",
-            message_vars=plan_event_vars("pptx", operations),
+            message_vars=plan_event_vars("pptx", operations, lang=req.lang),
         ),
     )
     await _emit(
@@ -463,7 +458,7 @@ def _extract_block(text: str, label: str) -> str | None:
 
 
 def _parse_plan(
-    text: str, warnings: list[WarningEntry]
+    text: str, warnings: list[WarningEntry], *, lang: str = "en-US"
 ) -> tuple[str, list[dict], bool]:
     """Return ``(reply, operations, plan_missing)``.
 
@@ -476,7 +471,7 @@ def _parse_plan(
     if not reply:
         # Fall back to any prose before the first fence.
         prefix = text.split("```", 1)[0].strip()
-        reply = prefix or "요청을 처리했습니다."
+        reply = prefix or reply_text("request_done", lang)
     if plan_raw is None:
         warnings.append(
             WarningEntry(

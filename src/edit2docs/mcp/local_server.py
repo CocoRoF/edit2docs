@@ -26,7 +26,7 @@ def build_local_mcp_server() -> FastMCP:
         instructions=(
             "Generate, chat-edit, preview and text-edit Office documents "
             "(.docx, .xlsx, .pptx) on the local filesystem — the file "
-            "extension picks the engine. Korean-first, natively editable "
+            "extension picks the engine. natively editable (English-first; first-class Korean) "
             "output. Call analyze_doc first when you need addresses for "
             "set_doc_text."
         ),
@@ -52,7 +52,7 @@ def build_local_mcp_server() -> FastMCP:
         template: str | None = None,
         deck_mode: str = "new",
         pages: tuple[int, int] = (8, 12),
-        lang: str = "ko-KR",
+        lang: str = "en-US",
         api_key: str | None = None,
     ) -> dict[str, Any]:
         result = await simple.async_generate_doc(
@@ -80,7 +80,7 @@ def build_local_mcp_server() -> FastMCP:
         instruction: str,
         output: str | None = None,
         sources: list[str] | None = None,
-        lang: str = "ko-KR",
+        lang: str = "en-US",
         api_key: str | None = None,
     ) -> dict[str, Any]:
         result = await simple.async_edit_doc(

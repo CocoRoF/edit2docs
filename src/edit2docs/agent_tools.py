@@ -34,7 +34,7 @@ ANTHROPIC_TOOLS: list[dict[str, Any]] = [
             ".xlsx (Excel workbook with styled sheets, real numbers, "
             "formulas), .pptx (full presentation pipeline — supports "
             "template/deck_mode/pages). Optionally ground the content in "
-            "source documents. Korean-first; any language works. PPTX "
+            "source documents. English-first; Korean and any other language work equally. PPTX "
             "generation is slow (minutes); DOCX/XLSX take one model call."
         ),
         "input_schema": {
@@ -69,7 +69,7 @@ ANTHROPIC_TOOLS: list[dict[str, Any]] = [
                     "maxItems": 2,
                     "description": "PPTX only: target [min, max] page count.",
                 },
-                "lang": {"type": "string", "description": "BCP-47, default ko-KR."},
+                "lang": {"type": "string", "description": "BCP-47, default en-US."},
             },
             "required": ["intent", "output"],
         },
@@ -98,7 +98,7 @@ ANTHROPIC_TOOLS: list[dict[str, Any]] = [
                     "items": {"type": "string"},
                     "description": "Reference document paths for this edit.",
                 },
-                "lang": {"type": "string", "description": "BCP-47, default ko-KR."},
+                "lang": {"type": "string", "description": "BCP-47, default en-US."},
             },
             "required": ["doc", "instruction"],
         },
@@ -218,7 +218,7 @@ async def run_tool_async(
             template=args.pop("template", None),
             deck_mode=args.pop("deck_mode", "new") or "new",
             pages=pages,  # type: ignore[arg-type]
-            lang=args.pop("lang", "ko-KR") or "ko-KR",
+            lang=args.pop("lang", "en-US") or "en-US",
         )
         return {
             "path": str(result.path),
@@ -232,7 +232,7 @@ async def run_tool_async(
             output=args.pop("output", None),
             api_key=api_key,
             sources=args.pop("sources", None),
-            lang=args.pop("lang", "ko-KR"),
+            lang=args.pop("lang", "en-US"),
         )
         return {
             "path": str(result.path),

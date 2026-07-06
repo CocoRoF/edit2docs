@@ -52,7 +52,7 @@ _MAX_PAGES = 200
 
 _HEADING_PT = {1: 20.0, 2: 16.0, 3: 14.0, 4: 12.0, 5: 11.0, 6: 11.0}
 
-_FONT_STACK = "'Noto Sans CJK KR', 'Malgun Gothic', 'Noto Sans', sans-serif"
+_FONT_STACK = "'Noto Sans', 'Segoe UI', 'Noto Sans CJK KR', 'Malgun Gothic', sans-serif"
 
 
 def _esc(s: str) -> str:

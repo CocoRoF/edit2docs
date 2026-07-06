@@ -51,7 +51,7 @@ def build_mcp_server(context: MCPContext | None = None) -> FastMCP:
     mcp = FastMCP(
         name="edit2docs",
         instructions=(
-            "edit2docs generates editable Korean-first PowerPoint decks. "
+            "edit2docs generates editable PowerPoint decks (English-first; first-class Korean). "
             "Discover templates with `list_templates`, narration voices with "
             "`list_voices`. Upload sources with `upload_source` (small files inline, "
             "or `request_upload_url` for larger files). Look up asset metadata with "
@@ -82,7 +82,7 @@ def build_mcp_server(context: MCPContext | None = None) -> FastMCP:
             "`template_name` later in generate_deck."
         ),
     )
-    def list_templates(locale: str = "ko-KR") -> dict[str, Any]:
+    def list_templates(locale: str = "en-US") -> dict[str, Any]:
         return {"templates": catalog.list_templates(locale=locale)}
 
     @mcp.tool(
@@ -229,7 +229,7 @@ def build_mcp_server(context: MCPContext | None = None) -> FastMCP:
     @mcp.tool(
         name="generate_deck",
         description=(
-            "Generate an editable Korean-first PPTX from previously uploaded "
+            "Generate an editable PPTX from previously uploaded "
             "sources. Returns `{ pptx_asset_id, page_count, spec_lock, "
             "detected_langs, design_spec }` on success. Pass the resulting "
             "pptx_asset_id to `download_url` to get a signed download link. "
@@ -238,7 +238,7 @@ def build_mcp_server(context: MCPContext | None = None) -> FastMCP:
             "Requires BYOK: provide your Anthropic API key in "
             "`anthropic_api_key`; we use it for this call only and never "
             "persist it. "
-            "Korean (ko-KR) is the default language; pass `lang` to switch. "
+            "English (en-US) is the default language; pass `lang` to switch (e.g. ko-KR). "
             "Pass `image_api_keys={\"OPENAI_API_KEY\":...}` to enable AI-image "
             "generation for hero / chart slides. Pass `narrate=True` to embed "
             "Korean speaker-notes narration (Edge-TTS) into the resulting "
@@ -256,7 +256,7 @@ def build_mcp_server(context: MCPContext | None = None) -> FastMCP:
         source_asset_ids: list[str] | None = None,
         target_min_pages: int = 8,
         target_max_pages: int = 12,
-        lang: str = "ko-KR",
+        lang: str = "en-US",
         style: str = "general",
         template_name: str | None = None,
         template_asset_id: str | None = None,
@@ -422,7 +422,7 @@ def build_mcp_server(context: MCPContext | None = None) -> FastMCP:
         anthropic_api_key: str,
         chat_history: list[dict] | None = None,
         source_asset_ids: list[str] | None = None,
-        lang: str = "ko-KR",
+        lang: str = "en-US",
         model: str = "claude-opus-4-7",
         output_basename: str = "deck",
         mcp_ctx: Context | None = None,

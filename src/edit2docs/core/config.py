@@ -439,10 +439,10 @@ DEFAULT_FONT_STACKS = {
 }
 
 
-def default_font_stack(lang: str, fallback: str = 'ko-KR') -> str:
+def default_font_stack(lang: str, fallback: str = 'en-US') -> str:
     """Return the default sans-serif font stack for a BCP-47 locale.
 
-    Falls back to *fallback* locale's stack (default ko-KR) for unknown languages.
+    Falls back to *fallback* locale's stack (default en-US) for unknown languages.
     """
     if lang in DEFAULT_FONT_STACKS:
         return DEFAULT_FONT_STACKS[lang]

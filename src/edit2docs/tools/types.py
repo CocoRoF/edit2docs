@@ -16,8 +16,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 # BCP-47 locales the engine knows how to render. New ones are added as we
 # expand prompt coverage (see core/prompts/*.{en,ko,zh,ja}.md).
+# English-first: en-US is the engine default; Korean stays a first-class
+# citizen (full ko message catalog, Hangul-aware layout, ko fonts/voices).
+# Pass lang="ko-KR" or set EDIT2DOCS_DEFAULT_LANG=ko-KR to flip a deployment.
 LangCode = Literal["ko-KR", "en-US", "zh-CN", "zh-TW", "ja-JP"]
-DEFAULT_LANG: LangCode = "ko-KR"
+DEFAULT_LANG: LangCode = "en-US"
 
 # Source document formats the converters understand.
 SourceFormat = Literal["pdf", "docx", "doc", "pptx", "xlsx", "xlsm", "html", "epub", "ipynb", "url"]

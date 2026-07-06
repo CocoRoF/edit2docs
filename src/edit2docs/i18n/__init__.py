@@ -1,4 +1,7 @@
-"""Bilingual message catalog (ko / en) for edit2docs user-facing strings.
+"""Bilingual message catalog (en / ko) for edit2docs user-facing strings.
+
+English-first: en-US is the default and fallback locale; ko-KR is a complete,
+first-class translation (not a subset).
 
 See ppt-master-analysis/06-bilingual-conventions.md for the policy:
 - Track A (filesystem, code, DB, API path): English ASCII only

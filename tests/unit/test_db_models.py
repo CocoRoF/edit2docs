@@ -200,10 +200,12 @@ async def test_job_cascades_to_events(session: AsyncSession):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_project_lang_defaults_to_korean(session: AsyncSession):
+async def test_project_lang_defaults_to_english(session: AsyncSession):
+    # English-first: new projects default to en-US; deployments flip via
+    # EDIT2DOCS_DEFAULT_LANG (request-level), not the column default.
     t = Tenant(name="T")
     p = Project(tenant=t, name="default-lang test")
     session.add(t)
     await session.commit()
     await session.refresh(p)
-    assert p.lang == "ko-KR"
+    assert p.lang == "en-US"

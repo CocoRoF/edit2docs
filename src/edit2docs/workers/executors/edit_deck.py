@@ -40,7 +40,7 @@ async def run_edit_deck(ctx: ExecutionContext) -> None:
     pptx_asset_id = uuid.UUID(params["pptx_asset_id"])
     instruction: str = params["instruction"]
     chat_history: list[dict] = params.get("chat_history", [])
-    lang: str = params.get("lang", "ko-KR")
+    lang: str = params.get("lang", "en-US")
     model: str = params.get("model", "claude-opus-4-7")
     anthropic_api_key: str = params["anthropic_api_key"]
 
