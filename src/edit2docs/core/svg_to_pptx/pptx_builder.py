@@ -120,6 +120,15 @@ def _add_default_content_type(content_types: str, extension: str, content_type: 
     return content_types.replace('</Types>', entry + '\n</Types>')
 
 
+def _add_content_type_override(content_types: str, part_name: str, content_type: str) -> str:
+    """Add an Override content type if it is not already present."""
+    normalized = '/' + part_name.lstrip('/')
+    if f'PartName="{normalized}"' in content_types:
+        return content_types
+    entry = f'  <Override PartName="{normalized}" ContentType="{content_type}"/>'
+    return content_types.replace('</Types>', entry + '\n</Types>')
+
+
 _IMAGE_CONTENT_TYPES = {
     'png': 'image/png',
     'jpg': 'image/jpeg',
@@ -523,6 +532,7 @@ def create_pptx_with_native_svg(
     image_sizing: str = 'cap',
     image_scale: float = 2.0,
     image_quality: int = 85,
+    native_objects: bool = False,
 ) -> bool:
     """Create a PPTX file with native SVG.
 
@@ -550,6 +560,8 @@ def create_pptx_with_native_svg(
         narration_audio: Optional dict mapping SVG stem to narration audio file.
         use_narration_timings: Whether to set slide auto-advance from audio duration.
         narration_padding: Extra seconds added after each narration before advancing.
+        native_objects: Convert explicit ``data-pptx-native`` table/chart
+            markers to native PowerPoint objects. Default off.
 
     Returns:
         Whether all slides were successfully created.
@@ -596,6 +608,10 @@ def create_pptx_with_native_svg(
         print(f"  SVG file count: {len(svg_files)}")
         if use_native_shapes:
             print(f"  Mode: Native DrawingML shapes (directly editable)")
+            print(
+                "  Native table/chart objects: "
+                f"{'Enabled' if native_objects else 'Disabled'}"
+            )
             if image_optimize:
                 if image_sizing == 'display':
                     image_mode = (
@@ -655,6 +671,8 @@ def create_pptx_with_native_svg(
         has_any_image = False
         media_cache: dict[tuple[str, str], str] = {}
         image_exts_used: set[str] = set()
+        package_exts_used: set[str] = set()
+        package_content_overrides: dict[str, str] = {}
         notes_slides_created: set[int] = set()
         narration_slides_created: set[int] = set()
         audio_exts_used: set[str] = set()
@@ -668,7 +686,14 @@ def create_pptx_with_native_svg(
                 if use_native_shapes:
                     slide_cfg = _slide_config(animation_config, svg_path.stem)
                     try:
-                        slide_xml, media_files_dict, rel_entries, anim_targets = (
+                        (
+                            slide_xml,
+                            media_files_dict,
+                            rel_entries,
+                            anim_targets,
+                            package_files_dict,
+                            content_type_overrides,
+                        ) = (
                             convert_svg_to_slide_shapes(
                                 svg_path, slide_num=slide_num, verbose=verbose,
                                 merge_paragraphs=merge_paragraphs,
@@ -677,6 +702,7 @@ def create_pptx_with_native_svg(
                                 image_sizing=image_sizing,
                                 image_scale=image_scale,
                                 image_quality=image_quality,
+                                native_objects=native_objects,
                             )
                         )
                     except Exception as conv_err:
@@ -694,6 +720,8 @@ def create_pptx_with_native_svg(
                         slide_xml, media_files_dict, rel_entries, anim_targets = (
                             _placeholder_slide_xml(slide_num, svg_path.name, conv_err)
                         )
+                        package_files_dict = {}
+                        content_type_overrides = {}
                     slide_transition, slide_transition_duration, slide_auto_advance = (
                         _slide_transition_settings(
                             slide_cfg,
@@ -784,6 +812,19 @@ def create_pptx_with_native_svg(
                         mapped_name = media_name_map.get(media_name)
                         if mapped_name:
                             rel['target'] = f'../media/{mapped_name}'
+
+                    # Write non-media OOXML package parts produced by native
+                    # object converters, e.g. chart XML, chart rels, and
+                    # embedded workbooks.
+                    for part_name, part_data in package_files_dict.items():
+                        package_path = extract_dir / part_name
+                        package_path.parent.mkdir(parents=True, exist_ok=True)
+                        with open(package_path, 'wb') as f:
+                            f.write(part_data)
+                        suffix = package_path.suffix.lstrip('.').lower()
+                        if suffix:
+                            package_exts_used.add(suffix)
+                    package_content_overrides.update(content_type_overrides)
 
                     # Build relationships XML
                     rels_dir = extract_dir / 'ppt' / 'slides' / '_rels'
@@ -995,6 +1036,14 @@ def create_pptx_with_native_svg(
                 ext,
                 _content_type_for_extension(ext),
             )
+        if 'xlsx' in package_exts_used:
+            content_types = _add_default_content_type(
+                content_types,
+                'xlsx',
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+        for part_name, content_type in sorted(package_content_overrides.items()):
+            content_types = _add_content_type_override(content_types, part_name, content_type)
         with open(content_types_path, 'w', encoding='utf-8') as f:
             f.write(content_types)
 

@@ -20,7 +20,7 @@ def _build_slide_xml(svg: str, tmp_path: Path) -> str:
 
     svg_path = tmp_path / "slide.svg"
     svg_path.write_text(svg, encoding="utf-8")
-    slide_xml, _media, _rels, _anim = convert_svg_to_slide_shapes(svg_path)
+    slide_xml, _media, _rels, _anim, _pkg, _cto = convert_svg_to_slide_shapes(svg_path)
     return slide_xml
 
 

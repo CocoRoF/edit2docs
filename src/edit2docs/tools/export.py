@@ -60,6 +60,15 @@ class ExportRequest(ToolRequest):
     enable_notes: bool = True
     use_native_shapes: bool = True
     use_compat_mode: bool = True
+    native_objects: bool = Field(
+        default=False,
+        description=(
+            "Opt in to converting explicit data-pptx-native table/chart marker "
+            "groups into native PowerPoint objects (graphicFrame table / chart "
+            "part + embedded workbook). Default off: marked groups export "
+            "through their SVG fallback children as plain shapes."
+        ),
+    )
 
     # Per-deck media assets. Keyed by the filename the SVGs reference, e.g.
     # `<image href="hero_cover.png">` -> images={"hero_cover.png": <png bytes>}.
@@ -178,6 +187,7 @@ def export_pptx(req: ExportRequest) -> ExportResponse:
             narration_audio=narration_map or None,
             use_narration_timings=req.use_narration_timings,
             narration_padding=req.narration_padding,
+            native_objects=req.native_objects,
         )
         if not ok:
             raise RuntimeError("core engine reported failure during PPTX assembly")

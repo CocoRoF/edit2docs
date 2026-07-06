@@ -159,6 +159,12 @@ Recorded narration:
                              help='Disable paragraph merging. Every dy-stacked line becomes '
                                   'its own text frame for strict SVG line-layout fidelity.')
     parser.set_defaults(merge_paragraphs=True)
+    parser.add_argument('--native-objects', action='store_true', default=False,
+                        help='Opt in to converting explicit data-pptx-native table/chart '
+                             'markers into native PowerPoint objects. Default off: marked '
+                             'groups export through their SVG fallback children. When set, '
+                             'the default-flow export is named <project>_<ts>_native_charts.pptx '
+                             'to tell it apart from a plain shape export.')
 
     def non_negative_float(value: str) -> float:
         try:
@@ -294,7 +300,13 @@ Recorded narration:
     else:
         exports_dir = project_path / "exports"
         exports_dir.mkdir(parents=True, exist_ok=True)
-        native_path = exports_dir / f"{project_name}_{timestamp}.pptx"
+        # --native-objects yields a materially different file (real editable
+        # PowerPoint chart/table objects instead of flattened shapes), so mark
+        # it in the default-flow name to tell it apart from a plain shape
+        # export. Flag-driven (not content-sniffed) so the name is predictable;
+        # an explicit -o keeps the caller's exact name untouched.
+        native_tag = "_native_charts" if args.native_objects else ""
+        native_path = exports_dir / f"{project_name}_{timestamp}{native_tag}.pptx"
 
         backup_dir = project_path / "backup" / timestamp
         backup_dir.mkdir(parents=True, exist_ok=True)
@@ -480,6 +492,7 @@ Recorded narration:
         image_sizing=args.image_sizing,
         image_scale=args.image_scale,
         image_quality=args.image_quality,
+        native_objects=args.native_objects,
     )
 
     success = True

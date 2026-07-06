@@ -181,6 +181,6 @@ def test_drawingml_converter_accepts_use_now(tmp_path):
     svg_path = tmp_path / "slide.svg"
     svg_path.write_text(svg, encoding="utf-8")
 
-    slide_xml, media, rels, anim = convert_svg_to_slide_shapes(svg_path)
+    slide_xml, media, rels, anim, _pkg, _cto = convert_svg_to_slide_shapes(svg_path)
     assert isinstance(slide_xml, str)
     assert "<p:sp" in slide_xml  # at least one shape made it through

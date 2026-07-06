@@ -20,6 +20,7 @@ from .drawingml_elements import (
     convert_polygon, convert_polyline,
     convert_text, convert_image, convert_nested_svg,
 )
+from .native_objects import convert_native_object
 
 
 class SvgNativeConversionError(RuntimeError):
@@ -187,6 +188,16 @@ def convert_g(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
         )
     else:
         child_ctx = ctx.child(dx, dy, sx, sy, filter_id=filter_id, style_overrides=style_overrides)
+
+    if child_ctx.native_objects_enabled:
+        native_result = convert_native_object(elem, child_ctx)
+        if native_result:
+            ctx.sync_from_child(child_ctx)
+            if should_animate_group:
+                shape_match = re.search(r'<p:cNvPr id="(\d+)"', native_result.xml)
+                if shape_match:
+                    ctx.anim_targets.append((int(shape_match.group(1)), elem_id))
+            return native_result
 
     child_results: list[ShapeResult] = []
     for child in elem:
@@ -443,7 +454,15 @@ def convert_svg_to_slide_shapes(
     image_sizing: str = 'cap',
     image_scale: float = 2.0,
     image_quality: int = 85,
-) -> tuple[str, dict[str, bytes], list[dict[str, str]], list]:
+    native_objects: bool = False,
+) -> tuple[
+    str,
+    dict[str, bytes],
+    list[dict[str, str]],
+    list,
+    dict[str, bytes],
+    dict[str, str],
+]:
     """Convert an SVG file to a complete DrawingML slide XML.
 
     Args:
@@ -460,15 +479,22 @@ def convert_svg_to_slide_shapes(
             size from rendered SVG boxes.
         image_scale: Target image pixels per SVG display pixel.
         image_quality: JPEG quality used for opaque optimized rasters.
+        native_objects: Convert explicit ``data-pptx-native`` table/chart
+            markers to native PowerPoint objects. Default off.
 
     Returns:
-        (slide_xml, media_files, rel_entries, anim_targets) where:
+        (slide_xml, media_files, rel_entries, anim_targets,
+        package_files, content_type_overrides) where:
         - slide_xml: Complete slide XML string.
         - media_files: Dict of {filename: bytes} for media to write.
         - rel_entries: List of relationship entries to add.
         - anim_targets: List of (shape_id, svg_id) tuples for top-level
           semantic groups, in z-order; consumed by the builder's optional
           per-element entrance timing emitter.
+        - package_files: Dict of {pptx internal path: bytes} for non-media
+          OOXML parts such as native chart XML and embedded workbooks.
+        - content_type_overrides: Dict of {pptx internal path: content type}
+          for package_files that require [Content_Types].xml overrides.
     """
     tree = ET.parse(str(svg_path))
     root = tree.getroot()
@@ -555,6 +581,7 @@ def convert_svg_to_slide_shapes(
         image_sizing=image_sizing,
         image_scale=image_scale,
         image_quality=image_quality,
+        native_objects_enabled=native_objects,
     )
 
     shapes: list[str] = []
@@ -614,4 +641,11 @@ def convert_svg_to_slide_shapes(
 <p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
 </p:sld>'''
 
-    return slide_xml, ctx.media_files, ctx.rel_entries, ctx.anim_targets
+    return (
+        slide_xml,
+        ctx.media_files,
+        ctx.rel_entries,
+        ctx.anim_targets,
+        ctx.package_files,
+        ctx.content_type_overrides,
+    )

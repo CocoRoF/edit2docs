@@ -103,7 +103,7 @@ def test_converter_no_longer_raises_on_unresolvable_use(tmp_path):
     svg_path.write_text(svg, encoding="utf-8")
 
     # Must not raise SvgNativeConversionError.
-    slide_xml, media, rels, anim = convert_svg_to_slide_shapes(svg_path)
+    slide_xml, media, rels, anim, _pkg, _cto = convert_svg_to_slide_shapes(svg_path)
     assert "<p:sp" in slide_xml
     # The text element survived.
     assert "제목" in slide_xml
