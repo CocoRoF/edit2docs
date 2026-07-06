@@ -10,6 +10,7 @@ from .drawingml_context import ConvertContext, ShapeResult
 from .drawingml_utils import (
     SVG_NS,
     _extract_inheritable_styles, parse_transform_matrix, resolve_url_id,
+    parse_svg_length,
 )
 from .drawingml_styles import build_effect_xml
 from .drawingml_elements import (
@@ -84,6 +85,19 @@ def parse_transform(transform_str: str) -> tuple[float, float, float, float, flo
         angle_deg = float(m.group(1))
 
     return dx, dy, sx, sy, angle_deg
+
+
+def _root_viewport_size(root: ET.Element) -> tuple[float, float]:
+    """Return the SVG root viewport size in user units."""
+    view_box = root.get('viewBox')
+    if view_box:
+        parts = [float(n) for n in re.findall(r'[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?', view_box)]
+        if len(parts) == 4 and parts[2] > 0 and parts[3] > 0:
+            return parts[2], parts[3]
+
+    width = parse_svg_length(root.get('width'), 1280.0)
+    height = parse_svg_length(root.get('height'), 720.0)
+    return max(width, 1.0), max(height, 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -429,7 +443,14 @@ def convert_svg_to_slide_shapes(
         )
 
     defs = collect_defs(root)
-    ctx = ConvertContext(defs=defs, slide_num=slide_num, svg_dir=Path(svg_path).parent)
+    viewport_width, viewport_height = _root_viewport_size(root)
+    ctx = ConvertContext(
+        defs=defs,
+        slide_num=slide_num,
+        viewport_width=viewport_width,
+        viewport_height=viewport_height,
+        svg_dir=Path(svg_path).parent,
+    )
 
     shapes: list[str] = []
     converted = 0

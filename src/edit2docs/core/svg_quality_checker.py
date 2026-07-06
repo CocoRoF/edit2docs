@@ -306,7 +306,7 @@ class SVGQualityChecker:
 
     def _check_viewbox(self, content: str, result: Dict, expected_format: str = None):
         """Check viewBox attribute"""
-        viewbox_match = re.search(r'viewBox="([^"]+)"', content)
+        viewbox_match = re.search(r'viewBox\s*=\s*["\']([^"\']+)["\']', content)
 
         if not viewbox_match:
             result['errors'].append("Missing viewBox attribute")
