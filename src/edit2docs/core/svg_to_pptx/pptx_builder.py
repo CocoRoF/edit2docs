@@ -517,6 +517,7 @@ def create_pptx_with_native_svg(
     narration_audio: dict[str, Path] | None = None,
     use_narration_timings: bool = False,
     narration_padding: float = 0.5,
+    merge_paragraphs: bool = True,
     image_optimize: bool = True,
     image_max_dimension: int | None = 2560,
     image_sizing: str = 'cap',
@@ -670,6 +671,7 @@ def create_pptx_with_native_svg(
                         slide_xml, media_files_dict, rel_entries, anim_targets = (
                             convert_svg_to_slide_shapes(
                                 svg_path, slide_num=slide_num, verbose=verbose,
+                                merge_paragraphs=merge_paragraphs,
                                 image_optimize=image_optimize,
                                 image_max_dimension=image_max_dimension,
                                 image_sizing=image_sizing,

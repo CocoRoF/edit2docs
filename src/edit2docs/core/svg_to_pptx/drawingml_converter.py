@@ -432,6 +432,7 @@ def convert_svg_to_slide_shapes(
     svg_path: Path,
     slide_num: int = 1,
     verbose: bool = False,
+    merge_paragraphs: bool = True,
     image_optimize: bool = True,
     image_max_dimension: int | None = 2560,
     image_sizing: str = 'cap',
@@ -444,6 +445,10 @@ def convert_svg_to_slide_shapes(
         svg_path: Path to the SVG file.
         slide_num: Slide number (for naming).
         verbose: Print progress info.
+        merge_paragraphs: When True, mergeable paragraph blocks (same x,
+            dy clustered around one base line-height) become a single
+            editable text frame with multiple <a:p>. Disable it to preserve
+            the SVG's exact line layout (one textbox per line).
         image_optimize: Downsample oversized raster images for PPTX export.
         image_max_dimension: Maximum optimized image dimension in pixels.
         image_sizing: ``cap`` to only cap source dimensions, ``display`` to
@@ -481,8 +486,10 @@ def convert_svg_to_slide_shapes(
     # and an x-anchored tspan would render in the wrong column. finalize_svg
     # does the same flattening on disk; doing it here keeps native pptx output
     # correct when reading raw svg_output/.
+    # merge_paragraphs additionally folds mergeable paragraph blocks into a
+    # single annotated <text> for downstream multi-<a:p> conversion.
     from .tspan_flattener import flatten_positional_tspans
-    if flatten_positional_tspans(tree) and verbose:
+    if flatten_positional_tspans(tree, merge_paragraphs=merge_paragraphs) and verbose:
         print('  Flattened positional <tspan> into independent <text>')
 
     # Inline standard SVG <use href="#id"/> references — LLM-emitted SVGs
@@ -531,6 +538,7 @@ def convert_svg_to_slide_shapes(
         viewport_width=viewport_width,
         viewport_height=viewport_height,
         svg_dir=Path(svg_path).parent,
+        merge_paragraphs=merge_paragraphs,
         image_optimize=image_optimize,
         image_max_dimension=image_max_dimension,
         image_sizing=image_sizing,

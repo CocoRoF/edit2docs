@@ -151,6 +151,14 @@ Recorded narration:
                             help='Only generate one version: native (editable shapes) or legacy (SVG image)')
     mode_group.add_argument('--native', action='store_true', default=False,
                             help='(Deprecated, now default) Convert SVG to native DrawingML shapes')
+    merge_group = parser.add_mutually_exclusive_group()
+    merge_group.add_argument('--merge-paragraphs', action='store_true', dest='merge_paragraphs',
+                             help='Compatibility no-op: mergeable paragraph blocks are merged '
+                                  'by default.')
+    merge_group.add_argument('--no-merge', action='store_false', dest='merge_paragraphs',
+                             help='Disable paragraph merging. Every dy-stacked line becomes '
+                                  'its own text frame for strict SVG line-layout fidelity.')
+    parser.set_defaults(merge_paragraphs=True)
 
     def non_negative_float(value: str) -> float:
         try:
@@ -466,6 +474,7 @@ Recorded narration:
         narration_audio=narration_audio,
         use_narration_timings=use_narration_timings,
         narration_padding=args.narration_padding,
+        merge_paragraphs=args.merge_paragraphs,
         image_optimize=not args.no_image_optimize,
         image_max_dimension=args.image_max_dimension,
         image_sizing=args.image_sizing,
