@@ -7,8 +7,10 @@ surface (``edit2docs.agent_tools``) and the zero-infra MCP server
 
     from edit2docs import generate_pptx, edit_pptx, preview_pptx
 
-    generate_pptx("Q3 영업 결과 임원 보고", output="deck.pptx")
-    result = edit_pptx("deck.pptx", "3번 슬라이드 제목을 'Q3 요약'으로 바꿔줘")
+    generate_pptx("Executive briefing on Q3 sales results", output="deck.pptx")
+    result = edit_pptx("deck.pptx", "Change the title of slide 3 to 'Q3 Summary'")
+    # Any language works the same way (Korean shown):
+    # generate_pptx("Q3 영업 결과 임원 보고", lang="ko-KR", output="deck.pptx")
     svgs = preview_pptx(result.path)
 
 Sync functions wrap async internals with ``asyncio.run``; use the
@@ -161,7 +163,7 @@ async def async_generate_pptx(
     template: str | Path | None = None,
     deck_mode: str = "new",
     pages: tuple[int, int] = (8, 12),
-    lang: str = "ko-KR",
+    lang: str = "en-US",
     style: str = "general",
     model: str = DEFAULT_MODEL,
     images: bool = False,
@@ -234,7 +236,7 @@ async def async_edit_pptx(
     api_key: str | None = None,
     sources: list[str | Path] | None = None,
     chat_history: list[dict] | None = None,
-    lang: str = "ko-KR",
+    lang: str = "en-US",
     model: str = DEFAULT_MODEL,
     on_event=None,
 ) -> EditResult:
@@ -536,7 +538,7 @@ async def async_generate_doc(
     template: str | Path | None = None,
     deck_mode: str = "new",
     pages: tuple[int, int] = (8, 12),
-    lang: str = "ko-KR",
+    lang: str = "en-US",
     model: str = DEFAULT_MODEL,
 ) -> GenerateResult:
     """Generate a document; the OUTPUT EXTENSION picks the engine.
@@ -588,7 +590,7 @@ async def async_edit_doc(
     api_key: str | None = None,
     sources: list[str | Path] | None = None,
     chat_history: list[dict] | None = None,
-    lang: str = "ko-KR",
+    lang: str = "en-US",
     model: str = DEFAULT_MODEL,
 ) -> EditResult:
     """One natural-language edit turn; the INPUT EXTENSION picks the engine."""

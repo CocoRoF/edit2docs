@@ -25,6 +25,7 @@ from docx.shared import Pt
 
 __all__ = [
     "docx_from_markdown",
+    "base_font_for_lang",
     "docx_to_markdown",
     "docx_to_html",
     "docx_preview",
@@ -83,8 +84,33 @@ def _is_separator_row(line: str) -> bool:
     )
 
 
-def docx_from_markdown(markdown: str, *, base_font: str = "맑은 고딕") -> bytes:
-    """Render the supported markdown subset into a .docx package."""
+# Per-locale body typefaces for freshly generated documents. English-first
+# default (Calibri, Word's own default face); CJK locales get their platform
+# staples. Fragments rendered for insert_after inherit the TARGET document's
+# Normal style on insertion, so this only shapes brand-new documents.
+_BASE_FONTS = {
+    "ko": "맑은 고딕",
+    "ja": "Yu Gothic",
+    "zh": "Microsoft YaHei",
+}
+_DEFAULT_BASE_FONT = "Calibri"
+
+
+def base_font_for_lang(lang: str | None) -> str:
+    """Default body typeface for a BCP-47 locale (en -> Calibri, ko -> 맑은 고딕)."""
+    prefix = (lang or "").split("-")[0].lower()
+    return _BASE_FONTS.get(prefix, _DEFAULT_BASE_FONT)
+
+
+def docx_from_markdown(
+    markdown: str, *, base_font: str | None = None, lang: str | None = None
+) -> bytes:
+    """Render the supported markdown subset into a .docx package.
+
+    ``base_font`` wins when given; otherwise the face follows ``lang``
+    (English-first: Calibri unless a CJK locale asks for its native face).
+    """
+    base_font = base_font or base_font_for_lang(lang)
     document = Document()
     style = document.styles["Normal"]
     style.font.name = base_font

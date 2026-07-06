@@ -195,8 +195,9 @@ def _style_discipline_issues(svg: str) -> list[tuple[str, str, dict]]:
         issues.append((
             "style_palette_too_large",
             (
-                f"슬라이드에 {len(colors)}개의 색상이 사용됨 (권장 ≤ 14). "
-                "spec_lock 의 palette 외부 색상이 다수 섞였을 가능성이 큽니다."
+                f"Slide uses {len(colors)} colors (recommended ≤ 14) — "
+                "likely mixing colors outside the spec_lock palette. "
+                f"슬라이드에 {len(colors)}개의 색상이 사용됨 (권장 ≤ 14)."
             ),
             {"colors_count": len(colors)},
         ))
@@ -216,8 +217,9 @@ def _style_discipline_issues(svg: str) -> list[tuple[str, str, dict]]:
         issues.append((
             "style_font_diversity_high",
             (
-                f"슬라이드에 {len(fonts)}개의 폰트 family 가 사용됨 (권장 ≤ 3). "
-                "spec_lock.typography 의 스택에서 벗어났을 가능성이 있습니다."
+                f"Slide uses {len(fonts)} font families (recommended ≤ 3) — "
+                "likely drifting from the spec_lock.typography stack. "
+                f"슬라이드에 {len(fonts)}개의 폰트 family 사용됨 (권장 ≤ 3)."
             ),
             {"fonts": sorted(fonts)},
         ))

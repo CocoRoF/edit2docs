@@ -158,6 +158,19 @@ class TestEditDocument:
         )
         assert len(llm.calls) == 2
         assert resp.changed is False
+        # English-first default: the engine's honesty notice is English…
+        assert "no changes were applied" in resp.reply
+
+    @pytest.mark.asyncio
+    async def test_plan_missing_notice_localizes_to_korean(self, monkeypatch):
+        content = docx_from_markdown(DOC_MD)
+        llm = _ScriptedLLM(outputs=["고치겠습니다.", "이번에도 계획 없음."])
+        _wire(monkeypatch, "edit2docs.tools.edit_doc", llm)
+        resp = await edit_document(
+            EditDocRequest(content=content, fmt="docx", instruction="다 고쳐줘",
+                           lang="ko-KR", anthropic_api_key="sk-stub")
+        )
+        assert resp.changed is False
         assert "적용되지 않았습니다" in resp.reply
 
 
@@ -204,7 +217,8 @@ class TestUnifiedFacade:
         from edit2docs.agent_tools import TOOL_NAMES, run_tool
 
         assert TOOL_NAMES == [
-            "generate_doc", "edit_doc", "preview_doc", "set_doc_text", "analyze_doc",
+            "generate_doc", "edit_doc", "preview_doc", "render_doc",
+            "set_doc_text", "analyze_doc",
         ]
         docx_path = tmp_path / "r.docx"
         docx_path.write_bytes(docx_from_markdown(DOC_MD))
@@ -246,7 +260,7 @@ class TestEditStreaming:
         planned = plan_evs[0].message_vars["plan"]
         assert len(planned) == 2
         assert planned[0]["target"] == {"kind": "paragraph", "para": 0}
-        assert "0번 문단 교체" in planned[0]["label"]
+        assert "Replace paragraph 0" in planned[0]["label"]
 
         op_evs = [e for e in events if "op" in e.message_vars]
         done = [e.message_vars["op"] for e in op_evs if e.message_vars["op"]["phase"] == "done"]

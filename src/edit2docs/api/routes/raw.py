@@ -15,6 +15,8 @@ from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import Response
 
 from ...storage import LocalFilesystemStorage, build_content_disposition, get_default_storage
+from ..dependencies import RequestLocale
+from ..errors import bilingual_detail
 
 router = APIRouter(prefix="/v1/raw", tags=["assets"])
 
@@ -22,6 +24,7 @@ router = APIRouter(prefix="/v1/raw", tags=["assets"])
 @router.get("/{key:path}")
 async def serve_raw(
     key: str,
+    locale: RequestLocale,
     e: int = Query(..., description="Expiry as a Unix timestamp"),
     s: str = Query(..., description="HMAC-SHA256 signature in lowercase hex"),
     fn: str | None = Query(default=None, description="Original filename (Unicode OK)"),
@@ -33,21 +36,23 @@ async def serve_raw(
         # Other backends (S3, in-memory) don't use this endpoint.
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "code": "RAW_DISABLED",
-                "message": "이 엔드포인트는 LocalFilesystemStorage 에서만 활성화됩니다.",
-                "message_en": "This endpoint is only enabled with LocalFilesystemStorage.",
-            },
+            detail=bilingual_detail(
+                "RAW_DISABLED",
+                en="This endpoint is only enabled with LocalFilesystemStorage.",
+                ko="이 엔드포인트는 LocalFilesystemStorage 에서만 활성화됩니다.",
+                locale=locale,
+            ),
         )
 
     if not storage.verify(key=key, method="GET", expires=e, sig=s):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "code": "RAW_SIGNATURE_INVALID",
-                "message": "URL 서명이 잘못되었거나 만료되었습니다.",
-                "message_en": "URL signature missing, mismatched, or expired.",
-            },
+            detail=bilingual_detail(
+                "RAW_SIGNATURE_INVALID",
+                en="URL signature missing, mismatched, or expired.",
+                ko="URL 서명이 잘못되었거나 만료되었습니다.",
+                locale=locale,
+            ),
         )
 
     try:
@@ -55,11 +60,12 @@ async def serve_raw(
     except KeyError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "code": "RAW_NOT_FOUND",
-                "message": "해당 자산 파일을 찾을 수 없습니다.",
-                "message_en": "Object not found.",
-            },
+            detail=bilingual_detail(
+                "RAW_NOT_FOUND",
+                en="Object not found.",
+                ko="해당 자산 파일을 찾을 수 없습니다.",
+                locale=locale,
+            ),
         ) from exc
 
     headers = {}

@@ -33,6 +33,7 @@ from ...services.jobs import (
     get_job,
     list_past_events,
 )
+from ..errors import bilingual_detail
 from ..dependencies import (
     Catalog,
     CurrentTenant,
@@ -67,7 +68,7 @@ class GenerateDeckBody(BaseModel):
     # Output document family: pptx (full deck pipeline) | docx | xlsx
     # (single writer/designer call + deterministic render).
     output_format: str = Field(default="pptx", description="pptx | docx | xlsx")
-    lang: str = "ko-KR"
+    lang: str = "en-US"
     template_name: str | None = None
     # User-provided PPTX template: upload the .pptx via POST /v1/assets
     # first, then reference it here. deck_mode picks how it is used:
@@ -103,7 +104,7 @@ class EditDeckBody(BaseModel):
         default_factory=list,
         description="Reference documents attached to this turn (assets from /v1/assets).",
     )
-    lang: str = "ko-KR"
+    lang: str = "en-US"
     model: str = "claude-opus-4-7"
     output_basename: str | None = None
     project_id: uuid.UUID | None = None
@@ -160,6 +161,7 @@ async def enqueue_generate_deck(
     request: Request,
     tenant: CurrentTenant,
     session: DbSession,
+    locale: RequestLocale,
     x_anthropic_api_key: Annotated[str | None, Header(alias="X-Anthropic-API-Key")] = None,
 ) -> JobResponse:
     """Create a queued generate_deck job and trigger execution.
@@ -174,21 +176,23 @@ async def enqueue_generate_deck(
     if not anthropic_key:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "LLM_API_KEY_MISSING",
-                "message": "Anthropic API 키가 필요합니다. X-Anthropic-API-Key 헤더로 전달하세요.",
-                "message_en": "Anthropic API key required. Pass via X-Anthropic-API-Key header.",
-            },
+            detail=bilingual_detail(
+                "LLM_API_KEY_MISSING",
+                en="Anthropic API key required. Pass via X-Anthropic-API-Key header.",
+                ko="Anthropic API 키가 필요합니다. X-Anthropic-API-Key 헤더로 전달하세요.",
+                locale=locale,
+            ),
         )
 
     if body.output_format not in ("pptx", "docx", "xlsx"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "INVALID_OUTPUT_FORMAT",
-                "message": f"output_format '{body.output_format}' 는 pptx | docx | xlsx 중 하나여야 합니다.",
-                "message_en": f"Unsupported output_format '{body.output_format}'.",
-            },
+            detail=bilingual_detail(
+                "INVALID_OUTPUT_FORMAT",
+                en=f"Unsupported output_format '{body.output_format}'.",
+                ko=f"output_format '{body.output_format}' 는 pptx | docx | xlsx 중 하나여야 합니다.",
+                locale=locale,
+            ),
         )
 
     if body.output_format != "pptx" and (
@@ -196,51 +200,54 @@ async def enqueue_generate_deck(
     ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "TEMPLATE_UNSUPPORTED_FOR_FORMAT",
-                "message": (
-                    f"템플릿/deck_mode는 pptx 출력에서만 지원됩니다 "
-                    f"(output_format={body.output_format})."
-                ),
-                "message_en": (
+            detail=bilingual_detail(
+                "TEMPLATE_UNSUPPORTED_FOR_FORMAT",
+                en=(
                     "template_asset_id / deck_mode are pptx-only options "
                     f"(output_format={body.output_format})."
                 ),
-            },
+                ko=(
+                    f"템플릿/deck_mode는 pptx 출력에서만 지원됩니다 "
+                    f"(output_format={body.output_format})."
+                ),
+                locale=locale,
+            ),
         )
 
     deck_mode = body.deck_mode
     if deck_mode not in ("new", "template_restyle", "template_extend"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "INVALID_DECK_MODE",
-                "message": (
-                    f"deck_mode '{deck_mode}' 는 지원되지 않습니다 — "
-                    "new | template_restyle | template_extend 중 하나여야 합니다."
-                ),
-                "message_en": (
+            detail=bilingual_detail(
+                "INVALID_DECK_MODE",
+                en=(
                     f"Unsupported deck_mode '{deck_mode}'; expected one of "
                     "new | template_restyle | template_extend."
                 ),
-            },
+                ko=(
+                    f"deck_mode '{deck_mode}' 는 지원되지 않습니다 — "
+                    "new | template_restyle | template_extend 중 하나여야 합니다."
+                ),
+                locale=locale,
+            ),
         )
     if body.template_asset_id is not None and deck_mode == "new":
         deck_mode = "template_restyle"
     if deck_mode != "new" and body.template_asset_id is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "TEMPLATE_ASSET_REQUIRED",
-                "message": (
-                    f"deck_mode '{deck_mode}' 는 template_asset_id 가 필요합니다. "
-                    "먼저 POST /v1/assets 로 템플릿 PPTX를 업로드하세요."
-                ),
-                "message_en": (
+            detail=bilingual_detail(
+                "TEMPLATE_ASSET_REQUIRED",
+                en=(
                     f"deck_mode '{deck_mode}' requires template_asset_id; "
                     "upload the template PPTX via POST /v1/assets first."
                 ),
-            },
+                ko=(
+                    f"deck_mode '{deck_mode}' 는 template_asset_id 가 필요합니다. "
+                    "먼저 POST /v1/assets 로 템플릿 PPTX를 업로드하세요."
+                ),
+                locale=locale,
+            ),
         )
 
     params = {
@@ -293,6 +300,7 @@ async def enqueue_edit_deck(
     request: Request,
     tenant: CurrentTenant,
     session: DbSession,
+    locale: RequestLocale,
     x_anthropic_api_key: Annotated[str | None, Header(alias="X-Anthropic-API-Key")] = None,
 ) -> JobResponse:
     """Create a queued edit_deck job (same queue semantics as generate-deck)."""
@@ -300,22 +308,24 @@ async def enqueue_edit_deck(
     if not anthropic_key:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "LLM_API_KEY_MISSING",
-                "message": "Anthropic API 키가 필요합니다. X-Anthropic-API-Key 헤더로 전달하세요.",
-                "message_en": "Anthropic API key required. Pass via X-Anthropic-API-Key header.",
-            },
+            detail=bilingual_detail(
+                "LLM_API_KEY_MISSING",
+                en="Anthropic API key required. Pass via X-Anthropic-API-Key header.",
+                ko="Anthropic API 키가 필요합니다. X-Anthropic-API-Key 헤더로 전달하세요.",
+                locale=locale,
+            ),
         )
 
     for turn in body.chat_history:
         if not isinstance(turn, dict) or turn.get("role") not in ("user", "assistant"):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "code": "INVALID_CHAT_HISTORY",
-                    "message": 'chat_history 항목은 {"role": "user"|"assistant", "content": "..."} 형식이어야 합니다.',
-                    "message_en": 'chat_history entries must be {"role": "user"|"assistant", "content": "..."}.',
-                },
+                detail=bilingual_detail(
+                    "INVALID_CHAT_HISTORY",
+                    en='chat_history entries must be {"role": "user"|"assistant", "content": "..."}.',
+                    ko='chat_history 항목은 {"role": "user"|"assistant", "content": "..."} 형식이어야 합니다.',
+                    locale=locale,
+                ),
             )
 
     params = {
@@ -403,17 +413,19 @@ async def get_job_status(
     job_id: uuid.UUID,
     tenant: CurrentTenant,
     session: DbSession,
+    locale: RequestLocale,
 ) -> JobResponse:
     try:
         job = await get_job(session=session, tenant=tenant, job_id=job_id)
     except JobNotFound as exc:
         raise HTTPException(
             status_code=404,
-            detail={
-                "code": "JOB_NOT_FOUND",
-                "message": f"작업 {job_id} 를 찾을 수 없습니다.",
-                "message_en": f"Job {job_id} not found.",
-            },
+            detail=bilingual_detail(
+                "JOB_NOT_FOUND",
+                en=f"Job {job_id} not found.",
+                ko=f"작업 {job_id} 를 찾을 수 없습니다.",
+                locale=locale,
+            ),
         ) from exc
     return JobResponse.from_row(job)
 
@@ -426,6 +438,7 @@ async def stream_job_events(
     job_id: uuid.UUID,
     tenant: CurrentTenant,
     session: DbSession,
+    locale: RequestLocale,
     after_id: Annotated[uuid.UUID | None, Query(description="Resume after this event id")] = None,
 ):
     """SSE stream of all stage events for *job_id*.
@@ -442,11 +455,12 @@ async def stream_job_events(
     except JobNotFound as exc:
         raise HTTPException(
             status_code=404,
-            detail={
-                "code": "JOB_NOT_FOUND",
-                "message": f"작업 {job_id} 를 찾을 수 없습니다.",
-                "message_en": f"Job {job_id} not found.",
-            },
+            detail=bilingual_detail(
+                "JOB_NOT_FOUND",
+                en=f"Job {job_id} not found.",
+                ko=f"작업 {job_id} 를 찾을 수 없습니다.",
+                locale=locale,
+            ),
         ) from exc
 
     history = await list_past_events(session=session, job_id=job_id, after_id=after_id)

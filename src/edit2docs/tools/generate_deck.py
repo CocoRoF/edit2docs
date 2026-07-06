@@ -5,9 +5,9 @@ single function call:
 
     result = await generate_deck(GenerateDeckRequest(
         sources=[ConvertRequest(source_type="pdf", content=pdf_bytes)],
-        user_intent="Q3 영업 결과 임원 보고",
+        user_intent="Executive briefing on Q3 sales results",
         target_pages=(8, 12),
-        lang="ko-KR",
+        lang="en-US",  # any supported locale, e.g. "ko-KR"
         anthropic_api_key="sk-ant-...",
     ))
 
@@ -240,7 +240,7 @@ async def generate_deck(
     if deck_mode != "new" and req.template_pptx is None:
         raise ValueError(
             f"deck_mode={deck_mode!r} requires template_pptx. "
-            "템플릿 모드는 템플릿 PPTX 파일이 필요합니다."
+            "Template mode requires a template PPTX file. 템플릿 모드는 템플릿 PPTX 파일이 필요합니다."
         )
     if req.template_pptx is not None:
         await _emit(
@@ -322,9 +322,10 @@ async def generate_deck(
             WarningEntry(
                 code="page_plan_trimmed_to_consecutive_run",
                 message=(
-                    f"design_spec 에서 {_before}개 후보 페이지가 검출되었으나 "
-                    f"P01 로 시작하는 연속 구간 {len(page_summaries)}개만 deck 에 포함됩니다. "
-                    "나머지는 차트/템플릿 참조로 판단되어 제외."
+                    f"{_before} candidate pages detected in design_spec but only "
+                    f"the contiguous run of {len(page_summaries)} starting at P01 is "
+                    "included in the deck; the rest look like chart/template references. "
+                    f"(연속 구간 {len(page_summaries)}개만 포함, 나머지 제외)"
                 ),
                 detail={"detected": _before, "kept": len(page_summaries)},
             )
@@ -336,8 +337,9 @@ async def generate_deck(
             WarningEntry(
                 code="page_plan_truncated_to_spec_lock",
                 message=(
-                    f"spec_lock 의 pages_total={_expected} 보다 많은 "
-                    f"{len(page_summaries)}개 페이지가 검출되어 {_expected}개로 잘랐습니다."
+                    f"Detected {len(page_summaries)} pages, more than spec_lock's "
+                    f"pages_total={_expected}; truncated to {_expected}. "
+                    f"({_expected}개로 잘랐습니다)"
                 ),
                 detail={
                     "spec_lock_pages_total": _expected,
@@ -527,8 +529,9 @@ async def generate_deck(
                 WarningEntry(
                     code="retry_per_page_cap_reached",
                     message=(
-                        f"{len(exhausted)} 페이지가 per-page 재시도 한도 "
-                        f"({per_page_cap}회) 에 도달해 더 이상 시도하지 않습니다."
+                        f"{len(exhausted)} page(s) hit the per-page retry cap "
+                        f"({per_page_cap}) and will not be retried further. "
+                        f"(재시도 한도 {per_page_cap}회 도달)"
                     ),
                     detail={"pages": exhausted, "per_page_cap": per_page_cap},
                 )
@@ -544,8 +547,9 @@ async def generate_deck(
                 WarningEntry(
                     code="retry_total_budget_reached",
                     message=(
-                        f"전체 재시도 예산이 {total_remaining}회 남아 "
-                        f"{len(picked)} 페이지만 시도하고 나머지 {len(dropped)} 페이지는 보류합니다."
+                        f"Only {total_remaining} retries left in the total budget: "
+                        f"retrying {len(picked)} page(s), deferring {len(dropped)}. "
+                        f"(나머지 {len(dropped)}페이지 보류)"
                     ),
                     detail={
                         "picked": picked,
@@ -738,8 +742,9 @@ async def generate_deck(
             WarningEntry(
                 code="export_placeholder_slides",
                 message=(
-                    f"{export_metrics.placeholder_slides}장이 placeholder 로 대체되었습니다 "
-                    f"— 해당 슬라이드 SVG 변환이 실패해 빈 안내 카드로 대체됨."
+                    f"{export_metrics.placeholder_slides} slide(s) were replaced by "
+                    "placeholders because their SVG conversion failed. "
+                    f"({export_metrics.placeholder_slides}장 placeholder 대체됨)"
                 ),
                 detail={"placeholder_count": export_metrics.placeholder_slides},
             )
@@ -749,8 +754,9 @@ async def generate_deck(
             WarningEntry(
                 code="export_palette_too_large",
                 message=(
-                    f"색상 팔레트가 {export_metrics.color_palette_size}개 "
-                    "(spec_lock 권장 ~6개) — 디자인 일관성을 위해 축소를 검토하세요."
+                    f"Color palette has {export_metrics.color_palette_size} colors "
+                    "(spec_lock recommends ~6) — consider consolidating for design "
+                    f"consistency. (팔레트 {export_metrics.color_palette_size}개)"
                 ),
                 detail={"palette_size": export_metrics.color_palette_size},
             )
@@ -894,10 +900,10 @@ def _format_layout_violation_message(code: str, detail: dict) -> str:
             bb = tuple(int(v) for v in big)
             r_pct = int((ratio or 0) * 100)
             return (
-                f"두 요소가 {r_pct}% 겹침: 작은 박스 (x={sb[0]}, y={sb[1]}, "
-                f"w={sb[2]}, h={sb[3]}) 가 큰 박스 (x={bb[0]}, y={bb[1]}, "
-                f"w={bb[2]}, h={bb[3]}) 내부에 위치. 작은 박스를 큰 박스 "
-                f"아래 (y >= {bb[1] + bb[3] + 8}) 로 옮기세요."
+                f"Two elements overlap by {r_pct}%: the small box (x={sb[0]}, "
+                f"y={sb[1]}, w={sb[2]}, h={sb[3]}) sits inside the big box "
+                f"(x={bb[0]}, y={bb[1]}, w={bb[2]}, h={bb[3]}). Move the small "
+                f"box below the big one (y >= {bb[1] + bb[3] + 8})."
             )
     if code == "layout_text_overflow_x":
         req_w = actual.get("required_w")
@@ -905,23 +911,23 @@ def _format_layout_violation_message(code: str, detail: dict) -> str:
         text = actual.get("text")
         if req_w and box_w:
             return (
-                f"텍스트 \"{text}\" 가 박스 폭 ({int(box_w)}px) 보다 큼 "
-                f"(필요 최소 폭 {int(req_w)}px). 컨테이너 폭을 ≥{int(req_w)}px "
-                "로 늘리거나 텍스트를 두 줄로 나누세요."
+                f"Text \"{text}\" is wider than its box ({int(box_w)}px; needs "
+                f"at least {int(req_w)}px). Widen the container to ≥{int(req_w)}px "
+                "or wrap the text onto two lines."
             )
     if code == "layout_off_canvas":
         bbox = actual.get("bbox")
         if bbox:
             b = tuple(int(v) for v in bbox)
             return (
-                f"요소가 1280×720 캔버스 밖으로 나감 (x={b[0]}, y={b[1]}, "
-                f"w={b[2]}, h={b[3]}). 좌표를 safe area (40..1240, 40..680) "
-                "안으로 재배치하세요."
+                f"Element extends outside the 1280x720 canvas (x={b[0]}, "
+                f"y={b[1]}, w={b[2]}, h={b[3]}). Reposition it inside the safe "
+                "area (40..1240, 40..680)."
             )
     if code == "layout_empty_decoration":
         return (
-            "내용 없는 <g>/<rect> (fill/stroke/자식 모두 없음) 가 제거됨. "
-            "장식이라면 fill 또는 stroke 을 지정하세요."
+            "Removed an empty <g>/<rect> (no fill, stroke, or children). "
+            "If it was decoration, give it an explicit fill or stroke."
         )
     return code.replace("_", " ")
 

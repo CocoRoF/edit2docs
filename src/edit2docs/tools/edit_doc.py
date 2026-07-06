@@ -19,6 +19,7 @@ from ..documents.docx_engine import DocxEdit, apply_docx_edits, docx_outline
 from ..documents.xlsx_engine import XlsxEdit, apply_xlsx_edits, xlsx_outline
 from ..llm import AnthropicClient, DEFAULT_MODEL, build_output_lang_directive, load_prompt
 from ._edit_events import op_event_vars, op_summary, plan_event_vars
+from ._reply_texts import reply_text
 from .edit_deck import ChatTurn, _cost_from_usage, _parse_plan
 from .generate_deck import EventCallback, StageEvent, _emit, _merge_cost
 from .types import (
@@ -84,7 +85,7 @@ async def edit_document(
         model=req.model,
     )
     cost = _merge_cost(cost, _cost_from_usage(result.usage))
-    reply, raw_ops, plan_missing = _parse_plan(result.text, warnings)
+    reply, raw_ops, plan_missing = _parse_plan(result.text, warnings, lang=req.lang)
 
     if plan_missing:
         retry = await client.complete(
@@ -101,13 +102,9 @@ async def edit_document(
             model=req.model,
         )
         cost = _merge_cost(cost, _cost_from_usage(retry.usage))
-        reply, raw_ops, plan_missing = _parse_plan(retry.text, warnings)
+        reply, raw_ops, plan_missing = _parse_plan(retry.text, warnings, lang=req.lang)
         if plan_missing:
-            reply = (
-                reply.rstrip()
-                + "\n\n[주의] 편집 계획 생성에 실패해 변경이 적용되지 않았습니다. "
-                "요청을 조금 더 구체적으로 나눠서 다시 보내주세요."
-            )
+            reply = reply.rstrip() + reply_text("plan_failed", req.lang)
 
     if len(raw_ops) > _MAX_OPERATIONS:
         warnings.append(
@@ -117,11 +114,8 @@ async def edit_document(
                 detail={"emitted": len(raw_ops), "cap": _MAX_OPERATIONS},
             )
         )
-        reply = (
-            reply.rstrip()
-            + f"\n\n[안내] 계획된 작업 {len(raw_ops)}개 중 상한에 따라 앞 "
-            f"{_MAX_OPERATIONS}개만 이번 턴에 적용합니다. 같은 요청을 한 번 더 "
-            "보내면 이어서 처리됩니다."
+        reply = reply.rstrip() + reply_text(
+            "plan_truncated", req.lang, emitted=len(raw_ops), cap=_MAX_OPERATIONS
         )
         raw_ops = raw_ops[:_MAX_OPERATIONS]
 
@@ -138,7 +132,7 @@ async def edit_document(
             StageEvent(
                 stage="editing_slides", progress=0.6,
                 message_key="stages.editing_slides",
-                message_vars=plan_event_vars(req.fmt, valid_ops),
+                message_vars=plan_event_vars(req.fmt, valid_ops, lang=req.lang),
             ),
         )
         new_content, applied_ops, op_warnings, op_results = _apply(
@@ -153,7 +147,7 @@ async def edit_document(
                     stage="applying_edits", progress=0.85,
                     message_key="stages.applying_edits",
                     message_vars=op_event_vars(
-                        op_summary(req.fmt, op, index=i, total=total),
+                        op_summary(req.fmt, op, index=i, total=total, lang=req.lang),
                         phase="done", status=status,
                     ),
                 ),

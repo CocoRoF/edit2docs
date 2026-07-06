@@ -1,6 +1,6 @@
 # edit2docs
 
-**AI-agent-native document engine — DOCX · XLSX · PPTX. Korean-first.**
+**AI-agent-native document engine — DOCX · XLSX · PPTX. English-first, with first-class Korean support.**
 
 [한국어 README](./README.ko.md) · Sister project of
 [edit2ppt](https://github.com/CocoRoF/edit2ppt) (the PPTX pipeline is inherited
@@ -35,16 +35,17 @@ extension picks the engine:
 ```python
 from edit2docs import generate_doc, edit_doc, preview_doc, analyze_doc, set_doc_text
 
-generate_doc("3분기 실적 보고서", output="report.docx")
-generate_doc("분기별 매출 정리", output="sales.xlsx", sources=["raw.pdf"])
-generate_doc("Q3 영업 결과 임원 보고", output="deck.pptx", template="brand.pptx",
-             deck_mode="template_restyle")
+generate_doc("Q3 performance report", output="report.docx")
+generate_doc("Quarterly sales summary", output="sales.xlsx", sources=["raw.pdf"])
+generate_doc("Executive briefing on Q3 sales", output="deck.pptx",
+             template="brand.pptx", deck_mode="template_restyle")
+generate_doc("3분기 실적 보고서", output="report.docx", lang="ko-KR")  # Korean works the same
 
-r = edit_doc("report.docx", "진행 사항 섹션에 배포 완료 항목을 추가해줘")
+r = edit_doc("report.docx", "Add a 'deployment complete' item to the progress section")
 print(r.reply, r.operations)
 
 info = analyze_doc("sales.xlsx")               # sheets + sample rows
-set_doc_text("sales.xlsx", [{"sheet": "매출", "cell": "B3", "value": 142}])
+set_doc_text("sales.xlsx", [{"sheet": "Sales", "cell": "B3", "value": 142}])
 ```
 
 BYOK: `api_key=...` or `ANTHROPIC_API_KEY`. The deterministic verbs need no key.
@@ -102,8 +103,15 @@ job queue, S3-compatible storage, PPTX studio endpoints.
 
 Every LLM planner follows the same contract: fenced `reply` + `edit_plan`
 blocks, one retry with a format reminder, and an honest reply (instead of a
-silent no-op) when planning fails. Korean-native throughout: Hangul-aware
-widths, `lang="ko-KR"` OOXML runs, bilingual errors.
+silent no-op) when planning fails.
+
+**Languages.** English is the default (`lang="en-US"`); Korean is a
+first-class citizen, not an afterthought — Hangul-aware text widths,
+per-run OOXML `lang` attributes detected from the actual script, Korean
+font stacks (Pretendard/Malgun), a complete Korean message catalog, and
+localized chat replies. Pass `lang="ko-KR"` per call or set
+`EDIT2DOCS_DEFAULT_LANG=ko-KR` to make a deployment Korean-by-default.
+zh-CN/zh-TW/ja-JP get the same script detection and font-stack treatment.
 
 ## License
 

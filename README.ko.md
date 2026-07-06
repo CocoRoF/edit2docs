@@ -1,6 +1,6 @@
 # edit2docs
 
-**AI Agent 네이티브 문서 엔진 — DOCX · XLSX · PPTX. 한국어 우선.**
+**AI Agent 네이티브 문서 엔진 — DOCX · XLSX · PPTX. English-first, 한국어는 완전한 1급 지원.**
 
 [English README](./README.md) · [edit2ppt](https://github.com/CocoRoF/edit2ppt)의
 자매 프로젝트 (PPTX 파이프라인 상속) · [ppt-master](https://github.com/hugohe3/ppt-master) (MIT) 기반

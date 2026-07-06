@@ -94,7 +94,7 @@ async def generate_document(req: GenerateDocRequest) -> GenerateDocResponse:
             continue
         artifact = block
         try:
-            content = _render(req.fmt, block)
+            content = _render(req.fmt, block, lang=req.lang)
             break
         except ValueError as exc:
             render_error = str(exc)
@@ -125,11 +125,11 @@ async def generate_document(req: GenerateDocRequest) -> GenerateDocResponse:
     )
 
 
-def _render(fmt: str, artifact: str) -> bytes:
+def _render(fmt: str, artifact: str, *, lang: str | None = None) -> bytes:
     if fmt == "docx":
         if not artifact.strip():
             raise ValueError("empty document body")
-        return docx_from_markdown(artifact)
+        return docx_from_markdown(artifact, lang=lang)
     try:
         spec = yaml.safe_load(artifact)
     except yaml.YAMLError as exc:

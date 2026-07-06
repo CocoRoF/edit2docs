@@ -36,7 +36,7 @@ def _load_layouts_index() -> dict[str, dict]:
     return json.loads(LAYOUTS_INDEX_PATH.read_text(encoding="utf-8"))
 
 
-def list_templates(*, locale: str = "ko-KR") -> list[dict]:
+def list_templates(*, locale: str = "en-US") -> list[dict]:
     """Return the template catalog as a list of plain dicts (MCP-serializable)."""
     locale = normalize_locale(locale)
     items: list[dict] = []

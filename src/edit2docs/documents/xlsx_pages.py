@@ -36,7 +36,7 @@ _MAX_ROWS = 2000
 _MAX_COLS = 128
 _MAX_PAGES = 200
 
-_FONT_STACK = "'Noto Sans CJK KR', 'Malgun Gothic', 'Noto Sans', sans-serif"
+_FONT_STACK = "'Noto Sans', 'Segoe UI', 'Noto Sans CJK KR', 'Malgun Gothic', sans-serif"
 
 
 def _esc(s: str) -> str:

@@ -20,7 +20,8 @@ from sqlalchemy import select
 from ...db.models import Asset
 from ...storage import get_default_storage
 from ...tools import RenderPreviewRequest, render_preview
-from ..dependencies import CurrentTenant, DbSession
+from ..dependencies import CurrentTenant, DbSession, RequestLocale
+from ..errors import bilingual_detail
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/preview", tags=["preview"])
@@ -54,6 +55,7 @@ async def preview_doc(
     body: PreviewBody,
     tenant: CurrentTenant,
     session: DbSession,
+    locale: RequestLocale,
 ) -> PreviewResponse:
     asset = (
         await session.execute(
@@ -65,11 +67,12 @@ async def preview_doc(
     if asset is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "code": "ASSET_NOT_FOUND",
-                "message": f"에셋 {body.pptx_asset_id} 를 찾을 수 없습니다.",
-                "message_en": f"Asset {body.pptx_asset_id} not found.",
-            },
+            detail=bilingual_detail(
+                "ASSET_NOT_FOUND",
+                en=f"Asset {body.pptx_asset_id} not found.",
+                ko=f"에셋 {body.pptx_asset_id} 를 찾을 수 없습니다.",
+                locale=locale,
+            ),
         )
 
     from ...documents import doc_format_of
@@ -81,11 +84,12 @@ async def preview_doc(
     except KeyError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "code": "ASSET_BYTES_MISSING",
-                "message": "에셋 파일이 아직 업로드되지 않았습니다.",
-                "message_en": "Asset bytes are not uploaded yet.",
-            },
+            detail=bilingual_detail(
+                "ASSET_BYTES_MISSING",
+                en="Asset bytes are not uploaded yet.",
+                ko="에셋 파일이 아직 업로드되지 않았습니다.",
+                locale=locale,
+            ),
         )
     try:
         if fmt == "pptx":
@@ -129,9 +133,10 @@ async def preview_doc(
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "code": "PREVIEW_RENDER_FAILED",
-                "message": f"미리보기 렌더링 실패: {exc}",
-                "message_en": f"Preview rendering failed: {exc}",
-            },
+            detail=bilingual_detail(
+                "PREVIEW_RENDER_FAILED",
+                en=f"Preview rendering failed: {exc}",
+                ko=f"미리보기 렌더링 실패: {exc}",
+                locale=locale,
+            ),
         ) from exc

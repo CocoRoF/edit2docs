@@ -126,9 +126,10 @@ class TestG3KoreanFontFallback:
         assert "Noto Sans KR" in stack
 
     def test_default_font_stack_falls_back(self):
-        # Unknown locale falls back to ko-KR (the configured default fallback).
+        # English-first: unknown locales fall back to the en-US stack;
+        # Korean callers still get the full Korean stack (test above).
         stack = default_font_stack("xx-XX")
-        assert stack == DEFAULT_FONT_STACKS["ko-KR"]
+        assert stack == DEFAULT_FONT_STACKS["en-US"]
 
     def test_default_font_stack_prefix_match(self):
         # 2-letter prefix matches: "ko" -> "ko-KR"

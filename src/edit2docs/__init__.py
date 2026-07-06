@@ -1,4 +1,4 @@
-"""edit2docs — AI-agent-native PPTX engine. Korean-first.
+"""edit2docs — AI-agent-native document engine. English-first, first-class Korean support.
 
 Four ways to use it:
 
