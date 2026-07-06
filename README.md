@@ -99,7 +99,11 @@ job queue, S3-compatible storage, PPTX studio endpoints.
 * **PPTX** — the full multi-stage deck pipeline inherited from edit2ppt:
   strategist → per-page SVG → native DrawingML, user-PPTX templates
   (restyle/extend), chat-edit with slide recompose, per-paragraph text edits
-  incl. table cells.
+  incl. table cells. Exported text is paragraph-merged (edits as real
+  paragraphs, not per-line boxes), and SVG groups marked
+  `data-pptx-native="chart|table"` export as **native, editable PowerPoint
+  charts** (chart XML + embedded workbook) **and tables** — not drawn
+  shapes (`ExportRequest(native_objects=True)`).
 
 Every LLM planner follows the same contract: fenced `reply` + `edit_plan`
 blocks, one retry with a format reminder, and an honest reply (instead of a
