@@ -465,9 +465,9 @@ def render_doc(
     LLM, no subprocess.
 
     Args:
-        doc: Source document. M1 supports ``.pptx`` end-to-end; ``.docx``
-            / ``.xlsx`` raise until their page engines land (M3/M4) —
-            use :func:`preview_doc` for their HTML previews meanwhile.
+        doc: Source document — ``.pptx`` / ``.docx`` / ``.xlsx`` all
+            render end-to-end (per-format native page engines; no
+            LibreOffice, no subprocess).
         to: ``"png"`` (page-1.png … page-N.png, pdftoppm-compatible
             naming), ``"pdf"`` (single ``<stem>.pdf``), or ``"svg"``
             (page-1.svg … — the raw vector pages).
