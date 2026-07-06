@@ -48,9 +48,11 @@ def flatten_positional_tspans(
     try:
         return flatten_text_with_tspans(tree, merge_paragraphs=merge_paragraphs)
     except TypeError:
-        # This fork's svg_finalize.flatten_tspan predates the upstream
-        # paragraph-merge annotation logic (b953d239's flatten_tspan hunks
-        # are not ported here). Fall back to plain flattening: no
-        # data-paragraph-* markers are produced, so paragraph mode degrades
-        # gracefully to the original one-textbox-per-line output.
+        # Safety net only: svg_finalize.flatten_tspan carries the upstream
+        # paragraph-merge annotation logic (b953d239, 37c825a0, cf0e2298,
+        # 850ad1be), so this branch never fires for the built-in pipeline.
+        # It survives for third-party/monkeypatched flatten_tspan variants
+        # that predate the merge_paragraphs kwarg: plain flattening emits no
+        # data-paragraph-* markers, so paragraph mode degrades gracefully to
+        # the original one-textbox-per-line output.
         return flatten_text_with_tspans(tree)
