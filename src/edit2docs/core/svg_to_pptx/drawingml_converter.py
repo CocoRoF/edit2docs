@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
 from .drawingml_context import ConvertContext, ShapeResult
 from .drawingml_utils import (
-    SVG_NS,
+    SVG_NS, EMU_PER_PX,
     _extract_inheritable_styles, parse_transform_matrix, resolve_url_id,
     parse_svg_length,
 )
@@ -100,6 +101,35 @@ def _root_viewport_size(root: ET.Element) -> tuple[float, float]:
     return max(width, 1.0), max(height, 1.0)
 
 
+# ``rotate(angle)`` defaults to pivot (0,0); ``rotate(angle, cx, cy)`` rotates
+# around (cx, cy). DrawingML grpSp ``rot`` always rotates around the group's
+# own bounding-box centre — we need the SVG pivot so ``convert_g`` can
+# compensate for the offset between those two centres.
+_ROTATE_RE = re.compile(
+    r'rotate\(\s*([-\d.eE+]+)(?:[\s,]+([-\d.eE+]+)[\s,]+([-\d.eE+]+))?\s*\)'
+)
+
+
+def _extract_rotate_pivot(transform_str: str) -> tuple[float, float] | None:
+    """Return the (cx, cy) pivot of a sole ``rotate(...)`` in *transform_str*.
+
+    Returns ``None`` when the transform list contains anything other than one
+    rotate (other ops compose with rotate in a way the pivot-compensation
+    fallback can't express). A bare ``rotate(angle)`` returns (0, 0).
+    """
+    if not transform_str:
+        return None
+    ops = [op for op in re.findall(r'(\w+)\s*\(', transform_str) if op]
+    if ops != ['rotate']:
+        return None
+    match = _ROTATE_RE.search(transform_str)
+    if not match:
+        return None
+    cx = float(match.group(2)) if match.group(2) is not None else 0.0
+    cy = float(match.group(3)) if match.group(3) is not None else 0.0
+    return cx, cy
+
+
 # ---------------------------------------------------------------------------
 # Group handling
 # ---------------------------------------------------------------------------
@@ -128,10 +158,25 @@ def convert_g(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
     matrix_supported = bool(transform) and visual_children and all(
         _supports_matrix_transform(child) for child in visual_children
     )
+    # A pure ``rotate(angle [cx cy])`` falls through to the fallback path
+    # below (children are rect/text/path/etc. that don't consume a full
+    # matrix). Decomposing the matrix produces translation components
+    # (e, f) that encode the pivot — handing those to children would
+    # *double-translate* them because grpSp's own ``rot`` already
+    # rotates around the group's bounding-box centre. Skip the child
+    # translation here and apply pivot-centre compensation to ``a:off``
+    # below instead.
+    rotate_pivot = _extract_rotate_pivot(transform) if not matrix_supported else None
     if matrix_supported:
         child_ctx = ctx.child(
             0, 0, 1.0, 1.0,
             transform_matrix=parse_transform_matrix(transform),
+            filter_id=filter_id,
+            style_overrides=style_overrides,
+        )
+    elif rotate_pivot is not None:
+        child_ctx = ctx.child(
+            0, 0, 1.0, 1.0,
             filter_id=filter_id,
             style_overrides=style_overrides,
         )
@@ -177,6 +222,31 @@ def convert_g(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
     group_w = max(int(max_x - min_x), 1)
     group_h = max(int(max_y - min_y), 1)
 
+    # ``rotate(angle, cx, cy)`` rotates around the SVG pivot, but DrawingML
+    # grpSp ``rot`` always rotates around the group's own bbox centre. When
+    # those centres differ, the visual position drifts by exactly the
+    # translation a rotate-around-pivot equals. Compensate by offsetting the
+    # outer <a:off> only; <a:chOff> stays on the unshifted bbox so children
+    # (still at their original SVG positions because rotate_pivot suppressed
+    # the dx/dy translation above) remain aligned inside the group.
+    off_x = group_x
+    off_y = group_y
+    if rotate_pivot is not None and angle_deg:
+        cx_svg, cy_svg = rotate_pivot
+        pivot_ex = (cx_svg + ctx.translate_x) * EMU_PER_PX
+        pivot_ey = (cy_svg + ctx.translate_y) * EMU_PER_PX
+        bbox_cx = group_x + group_w / 2
+        bbox_cy = group_y + group_h / 2
+        theta = math.radians(angle_deg)
+        cos_t = math.cos(theta)
+        sin_t = math.sin(theta)
+        # Where the bbox centre lands after rotating around the pivot, minus
+        # where DrawingML's grpSp rot would leave it (i.e. unchanged).
+        delta_x = (bbox_cx - pivot_ex) * cos_t - (bbox_cy - pivot_ey) * sin_t + pivot_ex - bbox_cx
+        delta_y = (bbox_cx - pivot_ex) * sin_t + (bbox_cy - pivot_ey) * cos_t + pivot_ey - bbox_cy
+        off_x = int(round(group_x + delta_x))
+        off_y = int(round(group_y + delta_y))
+
     shapes_xml = '\n'.join(result.xml for result in child_results)
     group_id = ctx.next_id()
 
@@ -203,7 +273,7 @@ def convert_g(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
 </p:nvGrpSpPr>
 <p:grpSpPr>
 <a:xfrm{rot_attr}>
-<a:off x="{group_x}" y="{group_y}"/>
+<a:off x="{off_x}" y="{off_y}"/>
 <a:ext cx="{group_w}" cy="{group_h}"/>
 <a:chOff x="{group_x}" y="{group_y}"/>
 <a:chExt cx="{group_w}" cy="{group_h}"/>
@@ -224,7 +294,7 @@ _NON_VISUAL_TAGS = frozenset(('defs', 'title', 'desc', 'metadata', 'style'))
 def _supports_matrix_transform(elem: ET.Element) -> bool:
     """Return whether this subtree can consume a full affine matrix directly."""
     tag = elem.tag.replace(f'{{{SVG_NS}}}', '')
-    if tag == 'image':
+    if tag in {'rect', 'circle', 'ellipse', 'line', 'path', 'polygon', 'polyline', 'image'}:
         return True
     if tag == 'svg':
         visual_children = [
@@ -362,6 +432,11 @@ def convert_svg_to_slide_shapes(
     svg_path: Path,
     slide_num: int = 1,
     verbose: bool = False,
+    image_optimize: bool = True,
+    image_max_dimension: int | None = 2560,
+    image_sizing: str = 'cap',
+    image_scale: float = 2.0,
+    image_quality: int = 85,
 ) -> tuple[str, dict[str, bytes], list[dict[str, str]], list]:
     """Convert an SVG file to a complete DrawingML slide XML.
 
@@ -369,6 +444,12 @@ def convert_svg_to_slide_shapes(
         svg_path: Path to the SVG file.
         slide_num: Slide number (for naming).
         verbose: Print progress info.
+        image_optimize: Downsample oversized raster images for PPTX export.
+        image_max_dimension: Maximum optimized image dimension in pixels.
+        image_sizing: ``cap`` to only cap source dimensions, ``display`` to
+            size from rendered SVG boxes.
+        image_scale: Target image pixels per SVG display pixel.
+        image_quality: JPEG quality used for opaque optimized rasters.
 
     Returns:
         (slide_xml, media_files, rel_entries, anim_targets) where:
@@ -450,6 +531,11 @@ def convert_svg_to_slide_shapes(
         viewport_width=viewport_width,
         viewport_height=viewport_height,
         svg_dir=Path(svg_path).parent,
+        image_optimize=image_optimize,
+        image_max_dimension=image_max_dimension,
+        image_sizing=image_sizing,
+        image_scale=image_scale,
+        image_quality=image_quality,
     )
 
     shapes: list[str] = []

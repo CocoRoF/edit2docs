@@ -306,6 +306,11 @@ def create_pptx_with_native_svg(
     narration_audio: dict[str, Path] | None = None,
     use_narration_timings: bool = False,
     narration_padding: float = 0.5,
+    image_optimize: bool = True,
+    image_max_dimension: int | None = 2560,
+    image_sizing: str = 'cap',
+    image_scale: float = 2.0,
+    image_quality: int = 85,
 ) -> bool:
     """Create a PPTX file with native SVG.
 
@@ -379,6 +384,20 @@ def create_pptx_with_native_svg(
         print(f"  SVG file count: {len(svg_files)}")
         if use_native_shapes:
             print(f"  Mode: Native DrawingML shapes (directly editable)")
+            if image_optimize:
+                if image_sizing == 'display':
+                    image_mode = (
+                        f"display scale {image_scale:g}, "
+                        f"max {image_max_dimension or 'unlimited'} px"
+                    )
+                else:
+                    image_mode = f"cap max {image_max_dimension or 'unlimited'} px"
+                print(
+                    "  Image optimization: Enabled "
+                    f"({image_mode}, JPEG q{image_quality})"
+                )
+            else:
+                print("  Image optimization: Disabled")
         elif use_compat_mode:
             print(f"  Compatibility mode: Enabled (PNG + SVG dual format)")
             print(f"  PNG renderer: {renderer_name} {renderer_status}")
@@ -440,6 +459,11 @@ def create_pptx_with_native_svg(
                         slide_xml, media_files_dict, rel_entries, anim_targets = (
                             convert_svg_to_slide_shapes(
                                 svg_path, slide_num=slide_num, verbose=verbose,
+                                image_optimize=image_optimize,
+                                image_max_dimension=image_max_dimension,
+                                image_sizing=image_sizing,
+                                image_scale=image_scale,
+                                image_quality=image_quality,
                             )
                         )
                     except Exception as conv_err:

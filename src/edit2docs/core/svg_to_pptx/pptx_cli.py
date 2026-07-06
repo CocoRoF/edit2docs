@@ -199,12 +199,31 @@ Recorded narration:
                         help='Prepare PowerPoint recorded timings and narrations from a complete audio directory')
     parser.add_argument('--narration-padding', type=float, default=0.5,
                         help='Seconds to add after each narration before auto-advance (default: 0.5)')
+    parser.add_argument('--no-image-optimize', action='store_true',
+                        help='Disable native PPTX raster image optimization; embeds original image bytes.')
+    parser.add_argument('--image-max-dimension', type=int, default=2560,
+                        help='Maximum optimized raster image dimension in pixels (default: 2560).')
+    parser.add_argument('--image-sizing', choices=['cap', 'display'], default='cap',
+                        help='Raster sizing mode: cap only limits source dimensions; display sizes from the SVG rendered box (default: cap).')
+    parser.add_argument('--image-scale', type=float, default=2.0,
+                        help='Target optimized image pixels per SVG display pixel when --image-sizing=display (default: 2.0).')
+    parser.add_argument('--image-quality', type=int, default=85,
+                        help='JPEG quality for optimized opaque raster images, 1-100 (default: 85).')
 
     args = parser.parse_args()
 
     project_path = Path(args.project_path)
     if not project_path.exists():
         print(f"Error: Path does not exist: {project_path}")
+        sys.exit(1)
+    if args.image_max_dimension < 1:
+        print("Error: --image-max-dimension must be >= 1", file=sys.stderr)
+        sys.exit(1)
+    if args.image_scale < 1:
+        print("Error: --image-scale must be >= 1", file=sys.stderr)
+        sys.exit(1)
+    if not 1 <= args.image_quality <= 100:
+        print("Error: --image-quality must be between 1 and 100", file=sys.stderr)
         sys.exit(1)
 
     try:
@@ -447,6 +466,11 @@ Recorded narration:
         narration_audio=narration_audio,
         use_narration_timings=use_narration_timings,
         narration_padding=args.narration_padding,
+        image_optimize=not args.no_image_optimize,
+        image_max_dimension=args.image_max_dimension,
+        image_sizing=args.image_sizing,
+        image_scale=args.image_scale,
+        image_quality=args.image_quality,
     )
 
     success = True

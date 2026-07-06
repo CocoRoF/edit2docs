@@ -42,6 +42,13 @@ class ConvertContext:
     rel_entries: list[dict[str, str]] = field(default_factory=list)
     rel_id_counter: int = 2  # rId1 reserved for slideLayout
     svg_dir: Path | None = None
+    # Native PPTX image optimization. Keeps generated decks compact by
+    # downsampling oversized raster assets to their rendered size.
+    image_optimize: bool = True
+    image_max_dimension: int | None = 2560
+    image_sizing: str = 'cap'
+    image_scale: float = 2.0
+    image_quality: int = 85
     inherited_styles: dict[str, str] = field(default_factory=dict)
     # Recursion depth — only the depth==0 (root) context records anim targets.
     depth: int = 0
@@ -84,7 +91,20 @@ class ConvertContext:
             style_overrides: Style attribute overrides from child element.
         """
         local_matrix = transform_matrix or IDENTITY_MATRIX
-        a1, b1, c1, d1, e1, f1 = self.transform_matrix
+        # When first crossing from scalar to matrix mode, fold accumulated
+        # translate_x/y and scale_x/y into the matrix base. Otherwise the
+        # ancestor's scalar transform — which matrix-path readers (e.g.
+        # <image>) never look at — is silently lost, and the descendant
+        # lands at raw SVG coordinates (typically near (0,0)).
+        if transform_matrix is not None and not self.use_transform_matrix:
+            base_matrix: AffineMatrix = (
+                self.scale_x, 0.0,
+                0.0, self.scale_y,
+                self.translate_x, self.translate_y,
+            )
+        else:
+            base_matrix = self.transform_matrix
+        a1, b1, c1, d1, e1, f1 = base_matrix
         a2, b2, c2, d2, e2, f2 = local_matrix
         combined_matrix: AffineMatrix = (
             a1 * a2 + c1 * b2,
@@ -132,6 +152,11 @@ class ConvertContext:
             rel_entries=self.rel_entries,
             rel_id_counter=self.rel_id_counter,
             svg_dir=self.svg_dir,
+            image_optimize=self.image_optimize,
+            image_max_dimension=self.image_max_dimension,
+            image_sizing=self.image_sizing,
+            image_scale=self.image_scale,
+            image_quality=self.image_quality,
             inherited_styles=merged,
             depth=self.depth + 1,
             # anim_targets is intentionally a fresh list on the child;
