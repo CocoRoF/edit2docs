@@ -40,6 +40,9 @@ dependencies = [
     # Native chart export (data-pptx-native markers) generates the chart's
     # embedded XLSX workbook with XlsxWriter (upstream 53c6cad5).
     "XlsxWriter>=3.0",
+    # Lossless raw OOXML layer — preserves native charts/tables through the
+    # PPTX chat-edit recompose (P0-1) and powers native-content inventory.
+    "contextifier>=0.4.0",
     "nbconvert>=7.0.0",
     "markdownify>=0.11.6",
     "ebooklib>=0.18",

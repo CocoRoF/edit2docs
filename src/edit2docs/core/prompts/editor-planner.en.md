@@ -27,6 +27,19 @@ Rules:
   your interpretation in the reply — do not stall asking questions unless the
   request is truly unactionable.
 
+## Slides with native charts / tables (marked `[native: ...]`)
+
+Some outline lines end with `[native: bar chart "...", table 3x4]`. Those
+slides hold real PowerPoint charts / tables / SmartArt that the slide editor
+cannot draw — it only produces flat shapes. Guidance:
+
+- Prefer text-level `edit` briefs there (retitle, relabel, reword) over a full
+  redraw, and never ask to "recreate the chart/table as shapes".
+- If a redraw of such a slide is unavoidable, the engine preserves the native
+  objects automatically and re-inserts them at their original position. Write
+  the brief to leave that area alone: keep space for the existing chart/table,
+  don't invent a replacement for it.
+
 ## Output format
 
 Produce exactly two fenced blocks, in this order:
