@@ -222,6 +222,8 @@ Anthropic 키는 **요청별 BYOK**(`X-Anthropic-API-Key` 헤더) — 절대 저
 | `EDIT2DOCS_S3_*` | (로컬 fs) | S3 호환 스토리지 endpoint / bucket / 키 |
 | `EDIT2DOCS_AUTH_DEV_API_KEY` | (익명) | 소규모 배포용 단일 bearer 토큰 |
 | `EDIT2DOCS_MAX_UPLOAD_SIZE_BYTES` | 200 MB | 리버스 프록시 설정과 맞추세요 |
+| `EDIT2DOCS_MODEL_{PLANNER,WRITER,STRATEGIST,EXECUTOR}` | (요청 모델) | 역할별 모델 오버라이드 — 플래너/작성기 턴을 더 작은 모델로 (호출부 무변경) |
+| `EDIT2DOCS_STRATEGIST_SOURCE_CHAR_CAP` | 60000 | 덱 전략가에 투입되는 소스 문서당 상한 (0 = 무제한) |
 
 ### 웹 스튜디오
 
@@ -314,6 +316,7 @@ uv venv .venv && uv pip install -e ".[server,dev]"
 | v0.4.0 | 주소화 네이티브 프리뷰 (`data-e2d-*`) — 프리뷰·아웃라인·에디터가 하나의 주소 체계 공유 |
 | v0.3.0 | 라이브 편집 스트리밍 — 주소화 타겟이 담긴 연산별 SSE 이벤트 |
 | v0.2.x | 멀티포맷 호스팅 API + 전 포맷 하드닝 |
+| **v0.9.0** | **토큰 최적화** — 프롬프트 캐시 재구성(편집 재시도가 캐시 프리픽스를 ~10× 저렴하게 읽음, 실행기 spec_lock 페이지당 재전송 제거), 팬아웃 캐시 웜업, 무제한 입력 캡(전략가 소스·편집 아웃라인 윈도잉), 재시도 심각도 티어링, 역할별 모델 티어링, 스트리밍, 캐시 회계·스테이지별 비용 |
 | v0.8.0 | **무손실 편집** — contextifier raw OOXML 레이어 위: set_doc_text/edit_doc가 차트·이미지·스파크라인·서식·수식 캐시를 파괴하지 않음; PPTX 채팅편집 네이티브 차트/표 보존; 신규 **`edit_chart`** 동사(데이터+제목, 임베디드 워크북 동기화) |
 | v0.1.0 | 멀티포맷 엔진: DOCX/XLSX/PPTX 핵심 동사 |
 

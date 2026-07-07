@@ -50,6 +50,14 @@ class StubLLM:
         temperature: float = 0.6,
         cache_system: bool = True,
         model: str | None = None,
+        # Token-cost levers: the Executor now delivers the deck-wide
+        # spec_lock via `system_suffix` (cached once, read per page) rather
+        # than inlining it in each user message. Record them so tests can
+        # assert on the request shape.
+        system_suffix: str | None = None,
+        user_suffix: str = "",
+        stream: bool | None = None,
+        **_kwargs,
     ) -> LLMResult:
         self.calls.append(
             {
@@ -59,6 +67,8 @@ class StubLLM:
                 "temperature": temperature,
                 "model": model,
                 "cache_system": cache_system,
+                "system_suffix": system_suffix,
+                "user_suffix": user_suffix,
             }
         )
         text = self.responses.pop(0) if self.responses else self.default

@@ -54,6 +54,20 @@ class Settings(BaseSettings):
     # Default language for new projects when none is specified
     default_lang: str = "en-US"
 
+    # -- LLM cost controls -------------------------------------------------
+    # Per-role model overrides (env EDIT2DOCS_MODEL_PLANNER etc.). Empty =
+    # use the request's model. Lets an operator run cheap planner/writer
+    # turns on Sonnet while keeping the executor/strategist on Opus, without
+    # changing any caller. resolve_model() below applies them.
+    model_planner: str = ""      # edit_deck / edit_doc chat planners
+    model_writer: str = ""       # docx/xlsx document writer
+    model_strategist: str = ""   # deck strategist
+    model_executor: str = ""     # per-page SVG executor
+    # Cap source-document markdown fed to the strategist, per source
+    # (characters). A large PDF otherwise dwarfs the whole deck's spend.
+    # 0 disables the cap.
+    strategist_source_char_cap: int = 60000
+
     # Standalone data root. SQLite db + local-fs storage live here when no
     # external Postgres / S3 is configured. Must be writable by the engine
     # process. Mount a docker volume here for persistence across restarts.
@@ -128,6 +142,26 @@ class Settings(BaseSettings):
     @property
     def uses_redis_queue(self) -> bool:
         return bool(self.redis_url)
+
+    def resolve_model(self, role: str, requested: str) -> str:
+        """The model to use for *role*, honoring per-role env overrides.
+
+        Falls back to *requested* (the caller's/user's BYOK model) when no
+        override is set for that role. ``role`` is one of ``planner`` /
+        ``writer`` / ``strategist`` / ``executor``.
+        """
+        override = {
+            "planner": self.model_planner,
+            "writer": self.model_writer,
+            "strategist": self.model_strategist,
+            "executor": self.model_executor,
+        }.get(role, "")
+        return override or requested
+
+
+def resolve_model(role: str, requested: str) -> str:
+    """Module-level shortcut for :meth:`Settings.resolve_model`."""
+    return get_settings().resolve_model(role, requested)
 
 
 @lru_cache(maxsize=1)

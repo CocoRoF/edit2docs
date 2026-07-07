@@ -16,6 +16,7 @@ from typing import Protocol
 
 from pydantic import Field
 
+from ..config import get_settings, resolve_model
 from ..llm import AnthropicClient, DEFAULT_MODEL, build_output_lang_directive, load_prompt
 from ..llm.anthropic_client import LLMResult, LLMUsage
 from .types import (
@@ -64,7 +65,13 @@ class StrategizeResponse(ToolResponse):
 
 
 class LLMCallable(Protocol):
-    """Minimal interface the tool needs from the LLM client (for test stubs)."""
+    """Minimal interface the tool needs from the LLM client (for test stubs).
+
+    Mirrors :meth:`AnthropicClient.complete`. ``system_suffix`` /
+    ``user_suffix`` / ``stream`` are the token-cost levers the Executor
+    uses (spec_lock cached as a shared system suffix); they are optional
+    so a stub only needs to accept ``**kwargs``.
+    """
 
     async def complete(
         self,
@@ -75,6 +82,9 @@ class LLMCallable(Protocol):
         temperature: float = ...,
         cache_system: bool = ...,
         model: str | None = ...,
+        system_suffix: str | None = ...,
+        user_suffix: str = ...,
+        stream: bool | None = ...,
     ) -> LLMResult: ...
 
 
@@ -95,15 +105,18 @@ async def strategize(
     # tells the model to emit user-facing strings in req.lang while keeping
     # YAML / JSON keys English (Track A).
     system_prompt = build_output_lang_directive(req.lang) + "\n\n" + load_prompt("strategist")
-    user_message = _build_user_message(req)
+    user_message = _build_user_message(req, warnings)
 
     llm = client or AnthropicClient(api_key=req.anthropic_api_key, model=req.model)
     result = await llm.complete(
         system_prompt=system_prompt,
         user_message=user_message,
-        max_output_tokens=8192,
+        # 16384 (was 8192): the Strategist emits design_spec + spec_lock +
+        # a full page outline; 8192 truncated large decks, triggering a
+        # recovery+retry cascade that cost far more than the extra budget.
+        max_output_tokens=16384,
         cache_system=True,
-        model=req.model,
+        model=resolve_model("strategist", req.model),
     )
 
     design_spec, spec_lock = _split_output(result.text, warnings)
@@ -138,7 +151,14 @@ async def strategize(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _build_user_message(req: StrategizeRequest) -> str:
+def _build_user_message(
+    req: StrategizeRequest,
+    warnings: list[WarningEntry] | None = None,
+) -> str:
+    # Cap each source's markdown before it's embedded. An untruncated PDF
+    # can dwarf the whole deck's token spend; the cap mirrors the 6k/12k
+    # source caps in edit_doc/generate_doc. 0 disables the cap.
+    source_cap = get_settings().strategist_source_char_cap
     lines: list[str] = []
     lines.append("# Inputs")
     lines.append(f"- Language: {req.lang}")
@@ -158,9 +178,29 @@ def _build_user_message(req: StrategizeRequest) -> str:
     if req.sources_markdown:
         lines.append("# Sources")
         for i, src in enumerate(req.sources_markdown, start=1):
+            body = src.strip()
+            if source_cap and len(body) > source_cap:
+                removed = len(body) - source_cap
+                body = body[:source_cap] + f"\n\n…(truncated {removed} chars)"
+                if warnings is not None:
+                    warnings.append(
+                        WarningEntry(
+                            code="strategist_source_truncated",
+                            message=(
+                                f"Source {i} markdown was capped to "
+                                f"{source_cap} chars ({removed} dropped) before "
+                                "strategizing to bound token spend."
+                            ),
+                            detail={
+                                "source_index": i,
+                                "cap": source_cap,
+                                "removed_chars": removed,
+                            },
+                        )
+                    )
             lines.append(f"## Source {i}")
             lines.append("```markdown")
-            lines.append(src.strip())
+            lines.append(body)
             lines.append("```")
         lines.append("")
     else:

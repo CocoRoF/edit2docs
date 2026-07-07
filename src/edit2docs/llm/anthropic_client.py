@@ -1,13 +1,24 @@
-"""Anthropic SDK wrapper with BYOK + prompt caching + retry.
+"""Anthropic SDK wrapper with BYOK + prompt caching + retry + streaming.
 
-Used by the Strategist and Executor tools. BYOK = the caller passes their own
-Anthropic API key per request; we never hold a server-wide key.
+Used by the Strategist, Executor and chat editors. BYOK = the caller passes
+their own Anthropic API key per request; we never hold a server-wide key.
 
-Prompt caching: the long system prompts (strategist.ko.md is ~500 lines,
-executor-base.ko.md is ~700 lines) are sent with `cache_control: ephemeral`
-so subsequent calls within the 5-minute TTL only pay for the user delta.
-This is critical for cost — per-page Executor calls reuse the same system
-prompt N times and would be ~$5+/deck without caching.
+Prompt caching (see docs/prompt-caching): caching is a **prefix match** and a
+breakpoint below the model's minimum cacheable size (4096 tokens on Opus,
+2048 on Sonnet/Fable, 1024 on older Sonnet) silently does nothing. Two levers
+this client exposes make it actually pay off:
+
+* ``system_suffix`` — a second, separately-cached system block. Per-page
+  Executor calls share one big cached prefix (the executor system prompt +
+  the spec_lock/brief suffix), so the spec_lock is written to cache once and
+  read back on every subsequent page instead of re-sent in each user message.
+* ``user_suffix`` — the volatile tail of a user message. The stable
+  ``user_message`` prefix carries a cache breakpoint; a retry re-sends the
+  identical prefix (cache read) and only the changed reminder in
+  ``user_suffix`` is uncached. Retries stop re-paying for the whole prompt.
+
+Streaming is used automatically for large ``max_output_tokens`` so long
+generations don't hit the SDK's ~10-minute non-streaming HTTP timeout.
 """
 
 from __future__ import annotations
@@ -20,13 +31,21 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# Default model — Opus 4.7 (1M context) per ppt-master-analysis recommendation.
-# Callers may override per-request when speed matters more than ceiling.
+# Default model. Opus 4.7 (1M context). Callers pass their own model per
+# request (BYOK); role-tiered overrides live in edit2docs.config.
 DEFAULT_MODEL = "claude-opus-4-7"
 
-# Retries on transient failures (429, 502, 503, 504). Exponential backoff with
-# jitter is handled by the Anthropic SDK; we only configure the retry count.
+# Retries on transient failures (429, 5xx). Backoff handled by the SDK.
 DEFAULT_MAX_RETRIES = 3
+
+# Above this output-token request size, stream to avoid the SDK's
+# non-streaming timeout guard (it refuses long non-streaming requests).
+_STREAM_THRESHOLD = 16000
+
+# Cache-cost weights (relative to a full-price input token): a cache write
+# costs ~1.25x, a cache read ~0.1x. Used only for the honest cost estimate.
+_CACHE_WRITE_WEIGHT = 1.25
+_CACHE_READ_WEIGHT = 0.10
 
 
 @dataclass
@@ -39,11 +58,25 @@ class LLMUsage:
     cache_write_tokens: int = 0
 
     @property
-    def billable_tokens(self) -> int:
-        """Tokens that cost real money (cache reads are billed at 10%)."""
-        return self.input_tokens + self.output_tokens
+    def total_prompt_tokens(self) -> int:
+        """Every prompt token, however billed (uncached + written + read)."""
+        return self.input_tokens + self.cache_write_tokens + self.cache_read_tokens
 
-    def __add__(self, other: "LLMUsage") -> "LLMUsage":
+    @property
+    def cost_input_equiv_tokens(self) -> float:
+        """Input-side cost in full-price-token equivalents.
+
+        Cache reads bill at ~0.1x and writes at ~1.25x, so this reflects the
+        real input cost — unlike a plain ``input + output`` sum, which
+        ignores cache tokens entirely (they are billed, just at a discount).
+        """
+        return (
+            self.input_tokens
+            + self.cache_write_tokens * _CACHE_WRITE_WEIGHT
+            + self.cache_read_tokens * _CACHE_READ_WEIGHT
+        )
+
+    def __add__(self, other: LLMUsage) -> LLMUsage:
         return LLMUsage(
             input_tokens=self.input_tokens + other.input_tokens,
             output_tokens=self.output_tokens + other.output_tokens,
@@ -54,7 +87,7 @@ class LLMUsage:
 
 @dataclass
 class LLMResult:
-    """One non-streaming completion."""
+    """One completion (streamed or not)."""
 
     text: str
     usage: LLMUsage
@@ -62,11 +95,64 @@ class LLMResult:
     stop_reason: str | None
 
 
-class AnthropicClient:
-    """Thin BYOK-friendly wrapper around `anthropic.AsyncAnthropic`.
+def build_create_kwargs(
+    *,
+    system_prompt: str,
+    user_message: str,
+    model: str,
+    max_output_tokens: int,
+    temperature: float | None,
+    cache_system: bool,
+    system_suffix: str | None,
+    user_suffix: str,
+) -> dict[str, Any]:
+    """Assemble ``messages.create`` kwargs — a pure function, so the cache
+    breakpoint placement is unit-testable without an API call.
 
-    The SDK is imported lazily so that test code (which never calls `complete`)
-    doesn't need the `anthropic` package installed.
+    Breakpoint budget is 4 (API max). We place at most:
+    * one on the main system block (when ``cache_system``),
+    * one on ``system_suffix`` (the shared per-page tail),
+    * one on the stable ``user_message`` prefix (so retries read it).
+    """
+    system_blocks: list[dict[str, Any]] = []
+    main_block: dict[str, Any] = {"type": "text", "text": system_prompt}
+    # When there's a suffix, the breakpoint that caches "everything so far"
+    # belongs on the LAST block; otherwise on the main block.
+    if cache_system and not system_suffix:
+        main_block["cache_control"] = {"type": "ephemeral"}
+    system_blocks.append(main_block)
+    if system_suffix:
+        suffix_block: dict[str, Any] = {"type": "text", "text": system_suffix}
+        if cache_system:
+            suffix_block["cache_control"] = {"type": "ephemeral"}
+        system_blocks.append(suffix_block)
+
+    # User content: cache the stable prefix so a retry (same prefix + a new
+    # reminder in user_suffix) reads it instead of re-paying full price.
+    if user_suffix:
+        user_content: Any = [
+            {"type": "text", "text": user_message, "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": user_suffix},
+        ]
+    else:
+        user_content = user_message
+
+    create_kwargs: dict[str, Any] = {
+        "model": model,
+        "max_tokens": max_output_tokens,
+        "system": system_blocks,
+        "messages": [{"role": "user", "content": user_content}],
+    }
+    if temperature is not None:
+        create_kwargs["temperature"] = temperature
+    return create_kwargs
+
+
+class AnthropicClient:
+    """Thin BYOK-friendly wrapper around ``anthropic.AsyncAnthropic``.
+
+    The SDK is imported lazily so test code (which never calls ``complete``)
+    doesn't need the ``anthropic`` package installed.
     """
 
     def __init__(
@@ -115,34 +201,51 @@ class AnthropicClient:
         temperature: float | None = None,
         cache_system: bool = True,
         model: str | None = None,
+        system_suffix: str | None = None,
+        user_suffix: str = "",
+        stream: bool | None = None,
     ) -> LLMResult:
-        """One-shot completion with optional system-prompt caching.
+        """One completion with prompt caching + optional streaming.
 
-        `temperature` is optional and intentionally omitted from the SDK
-        call when None — recent Claude models (Opus 4.5+) reject the
-        parameter outright with `temperature is deprecated for this model`.
+        Args:
+            system_prompt: the primary (large, stable) system prompt.
+            user_message: the stable user prefix. When ``user_suffix`` is
+                given, this prefix carries a cache breakpoint so retries
+                read it back.
+            system_suffix: a second cached system block shared across calls
+                (e.g. the per-deck spec_lock / layout brief). Written to
+                cache once, read on every subsequent page.
+            user_suffix: the volatile user tail (e.g. a retry reminder);
+                never cached.
+            stream: force streaming on/off; ``None`` auto-streams for large
+                ``max_output_tokens``.
+
+        ``temperature`` is omitted from the SDK call when None — recent
+        Claude models (Opus 4.7+) reject the parameter.
         """
         client = self._ensure_client()
-        system_blocks: list[dict[str, Any]] = [{"type": "text", "text": system_prompt}]
-        if cache_system:
-            system_blocks[0]["cache_control"] = {"type": "ephemeral"}
-
-        create_kwargs: dict[str, Any] = {
-            "model": model or self._model,
-            "max_tokens": max_output_tokens,
-            "system": system_blocks,
-            "messages": [{"role": "user", "content": user_message}],
-        }
-        if temperature is not None:
-            create_kwargs["temperature"] = temperature
-
-        response = await client.messages.create(**create_kwargs)
-        usage = _extract_usage(response)
-        text = _extract_text(response)
-        return LLMResult(
-            text=text,
-            usage=usage,
+        create_kwargs = build_create_kwargs(
+            system_prompt=system_prompt,
+            user_message=user_message,
             model=model or self._model,
+            max_output_tokens=max_output_tokens,
+            temperature=temperature,
+            cache_system=cache_system,
+            system_suffix=system_suffix,
+            user_suffix=user_suffix,
+        )
+
+        use_stream = max_output_tokens > _STREAM_THRESHOLD if stream is None else stream
+        if use_stream:
+            async with client.messages.stream(**create_kwargs) as stream_ctx:
+                response = await stream_ctx.get_final_message()
+        else:
+            response = await client.messages.create(**create_kwargs)
+
+        return LLMResult(
+            text=_extract_text(response),
+            usage=_extract_usage(response),
+            model=create_kwargs["model"],
             stop_reason=getattr(response, "stop_reason", None),
         )
 
@@ -151,8 +254,7 @@ def _extract_text(response: Any) -> str:
     """Concatenate text blocks from a Messages response."""
     parts: list[str] = []
     for block in getattr(response, "content", []) or []:
-        block_type = getattr(block, "type", None)
-        if block_type == "text":
+        if getattr(block, "type", None) == "text":
             parts.append(getattr(block, "text", ""))
     return "".join(parts)
 
