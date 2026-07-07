@@ -101,7 +101,7 @@ app = FastAPI(
     title="edit2docs",
     description=(
         "AI-agent-native PPT generation server. Korean-language-first, "
-        "built on top of ppt-master (MIT)."
+        "built on top of ppt-master."
     ),
     version="0.1.0",
     lifespan=lifespan,

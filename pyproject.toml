@@ -1,14 +1,19 @@
 [project]
 name = "edit2docs"
-version = "0.7.0"
+version = "0.7.1"
 description = "AI-agent-native document engine: generate and chat-edit DOCX, XLSX and PPTX as a Python library, agent tool set, MCP server or hosted service. English-first with first-class Korean support. Sister project of edit2ppt."
 readme = "README.md"
 requires-python = ">=3.11"
-license = {text = "MIT"}
+license = {text = "Apache-2.0"}
 authors = [{name = "edit2docs contributors"}]
-keywords = ["pptx", "presentation", "ai-agent", "mcp", "korean"]
+keywords = [
+    "pptx", "docx", "xlsx", "powerpoint", "word", "excel", "ooxml",
+    "document-generation", "document-editing", "presentation",
+    "ai-agent", "agent-tools", "llm", "mcp", "model-context-protocol",
+    "anthropic", "claude", "korean", "i18n",
+]
 classifiers = [
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
