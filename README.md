@@ -235,6 +235,8 @@ Key env vars (prefix `EDIT2DOCS_`):
 | `EDIT2DOCS_S3_*` | (local fs) | endpoint / bucket / keys for S3-compatible storage |
 | `EDIT2DOCS_AUTH_DEV_API_KEY` | (anonymous) | single bearer token for small deployments |
 | `EDIT2DOCS_MAX_UPLOAD_SIZE_BYTES` | 200 MB | match your reverse proxy |
+| `EDIT2DOCS_MODEL_{PLANNER,WRITER,STRATEGIST,EXECUTOR}` | (request model) | per-role model override — run cheap planner/writer turns on a smaller model without touching callers |
+| `EDIT2DOCS_STRATEGIST_SOURCE_CHAR_CAP` | 60000 | cap per source doc fed to the deck strategist (0 = uncapped) |
 
 ### The web studio
 
@@ -328,7 +330,8 @@ uv venv .venv && uv pip install -e ".[server,dev]"
 
 | version | highlights |
 |---|---|
-| **v0.8.0** | **lossless editing** on [contextifier](https://github.com/CocoRoF/Contextifier)'s raw OOXML layer — set_doc_text/edit_doc no longer destroy charts, images, sparklines, styles or cached formulas; PPTX chat-edit preserves native charts/tables; new **`edit_chart`** verb (data + title, embedded workbook synced) |
+| **v0.9.0** | **token optimization** — prompt-cache restructuring (edit retries read the cached prefix ~10× cheaper; per-page executor spec_lock cached once, not re-sent), fan-out cache warm-up, unbounded-input caps (strategist sources, edit outline windowing), retry-severity tiering, per-role model tiering, streaming, honest cache accounting + per-stage cost |
+| v0.8.0 | **lossless editing** on [contextifier](https://github.com/CocoRoF/Contextifier)'s raw OOXML layer — set_doc_text/edit_doc no longer destroy charts, images, sparklines, styles or cached formulas; PPTX chat-edit preserves native charts/tables; new **`edit_chart`** verb (data + title, embedded workbook synced) |
 | v0.7.0 | upstream sync (ppt-master v2.7 → v3.1, 3 waves): **native chart/table export**, paragraph-merge editability, PowerPoint repair-prompt fixes, checker hardening · **English-first flip** with full Korean support |
 | v0.5–0.6 | `render_doc` — native page rendering to PNG/PDF/SVG for all 3 formats (resvg + PyMuPDF, no LibreOffice) |
 | v0.4.0 | addressable native previews (`data-e2d-*`) — preview, outline and editor share one address space |
