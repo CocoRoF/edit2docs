@@ -4,7 +4,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/edit2docs)](https://pypi.org/project/edit2docs/)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://pypi.org/project/edit2docs/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green)](./LICENSE)
 
 [English README](./README.md)
 
@@ -310,6 +310,9 @@ uv venv .venv && uv pip install -e ".[server,dev]"
 
 ## 라이선스
 
-MIT. PPTX 코어는 [ppt-master](https://github.com/hugohe3/ppt-master)(MIT)를
-[edit2ppt](https://github.com/CocoRoF/edit2ppt) 경유로 포크했으며 upstream
-v3.1까지 동기화 유지 중입니다.
+[Apache-2.0](./LICENSE). `src/edit2docs/core/`의 PPTX 코어는
+[ppt-master](https://github.com/hugohe3/ppt-master)(MIT, © Hugo He)에서
+[edit2ppt](https://github.com/CocoRoF/edit2ppt)를 거쳐 파생됐으며 upstream
+v3.1까지 동기화 유지 중입니다. 해당 부분의 원본 MIT 조항은
+[NOTICE](./NOTICE)와 [LICENSE.ppt-master.MIT](./LICENSE.ppt-master.MIT)에
+보존되어 있습니다.

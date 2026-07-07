@@ -4,7 +4,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/edit2docs)](https://pypi.org/project/edit2docs/)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://pypi.org/project/edit2docs/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green)](./LICENSE)
 
 [한국어 README](./README.ko.md)
 
@@ -35,7 +35,7 @@ print(r.reply)          # the editor explains what it changed
 |---|---|
 | **[edit2docs](https://github.com/CocoRoF/edit2docs)** (this repo) | The engine: library · agent tools · MCP · hosted FastAPI service |
 | **[edit2docs-web](https://github.com/CocoRoF/edit2docs-web)** | Web studio for the hosted service — upload, generate, chat-edit with a live addressable preview, per-op edit highlighting, EN/KO UI. Next.js 15 / React 19 / Tailwind |
-| [ppt-master](https://github.com/hugohe3/ppt-master) | Upstream project (MIT) the PPTX core is forked from — synced through v3.1 |
+| [ppt-master](https://github.com/hugohe3/ppt-master) | Upstream project (MIT) the PPTX core is derived from — synced through v3.1 |
 | [edit2ppt](https://github.com/CocoRoF/edit2ppt) | Sister project; the deck pipeline and hosted service originate there |
 
 A production deployment of engine + studio runs behind
@@ -317,6 +317,9 @@ uv venv .venv && uv pip install -e ".[server,dev]"
 
 ## License
 
-MIT. PPTX core forked from [ppt-master](https://github.com/hugohe3/ppt-master)
-(MIT) via [edit2ppt](https://github.com/CocoRoF/edit2ppt), and kept in sync
-(currently through upstream v3.1).
+[Apache-2.0](./LICENSE). The PPTX core under `src/edit2docs/core/` is derived
+from [ppt-master](https://github.com/hugohe3/ppt-master) (MIT, © Hugo He) via
+[edit2ppt](https://github.com/CocoRoF/edit2ppt) and kept in sync (currently
+through upstream v3.1); the original MIT terms for those portions are
+preserved in [NOTICE](./NOTICE) and
+[LICENSE.ppt-master.MIT](./LICENSE.ppt-master.MIT).
