@@ -34,6 +34,9 @@ dependencies = [
     "PyMuPDF>=1.23.0",
     "mammoth>=1.6.0",
     "openpyxl>=3.1.0",
+    # Lossless raw-layer editing for xlsx/docx: charts, sparklines,
+    # customXml and cached formula values survive edits byte-identical.
+    "contextifier>=0.4.0",
     # Native chart export (data-pptx-native markers) generates the chart's
     # embedded XLSX workbook with XlsxWriter (upstream 53c6cad5).
     "XlsxWriter>=3.0",

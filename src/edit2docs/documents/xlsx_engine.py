@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import io
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -157,7 +158,12 @@ def _load(content: bytes):
 
 
 def xlsx_outline(content: bytes, *, sample_rows: int = 8) -> dict:
-    """Workbook structure: sheets, dimensions, headers, sample rows."""
+    """Workbook structure: sheets, dimensions, headers, sample rows.
+
+    Additive: a workbook-level ``"charts"`` list (``kind`` / ``title`` /
+    ``series_names`` per chart, read via contextifier's ChartModel) so
+    the edit planner is not blind to charts it must not clobber.
+    """
     wb = _load(content)
     sheets = []
     for ws in wb.worksheets:
@@ -174,7 +180,26 @@ def xlsx_outline(content: bytes, *, sample_rows: int = 8) -> dict:
                 "sample": sample,
             }
         )
-    return {"sheets": sheets}
+    return {"sheets": sheets, "charts": _chart_outline(content)}
+
+
+def _chart_outline(content: bytes) -> list[dict]:
+    """Read-only chart summaries via contextifier (best-effort: outline
+    must never fail because a chart part is exotic)."""
+    try:
+        from contextifier import open_raw
+
+        raw = open_raw(content, extension="xlsx")
+        return [
+            {
+                "kind": chart.kind,
+                "title": chart.title,
+                "series_names": [s.name for s in chart.series],
+            }
+            for chart in raw.charts
+        ]
+    except Exception:
+        return []
 
 
 def xlsx_to_markdown(content: bytes, *, max_rows: int = 40) -> str:
@@ -233,34 +258,56 @@ class XlsxEditResult:
 
 
 def apply_xlsx_edits(content: bytes, edits: Iterable[XlsxEdit]) -> tuple[bytes, list[XlsxEditResult]]:
-    wb = _load(content)
+    """Apply edits losslessly via contextifier's raw layer.
+
+    Only the worksheet parts an edit actually touches (plus
+    ``xl/workbook.xml`` when a formula cache goes stale) are rewritten —
+    charts, chart styles, sparklines, pivot tables, customXml and cached
+    formula values all survive byte-identical (the old openpyxl
+    load→save round-trip destroyed every one of those on EVERY edit).
+    """
+    from contextifier import open_raw
+
+    try:
+        raw = open_raw(content, extension="xlsx")
+    except Exception as exc:
+        raise ValueError(
+            f"XLSX could not be opened: {exc}. XLSX 파일을 열 수 없습니다."
+        ) from exc
     results: list[XlsxEditResult] = []
     for edit in edits:
-        results.append(_apply_one(wb, edit))
-    buf = io.BytesIO()
-    wb.save(buf)
-    return buf.getvalue(), results
+        results.append(_apply_one(raw, edit))
+    return raw.to_bytes(), results
 
 
-def _apply_one(wb, edit: XlsxEdit) -> XlsxEditResult:
+def _apply_one(raw, edit: XlsxEdit) -> XlsxEditResult:
     if edit.action == "add_sheet":
         if not edit.sheet:
             return XlsxEditResult(edit.action, "invalid", "add_sheet needs a sheet name")
-        if edit.sheet in wb.sheetnames:
+        if edit.sheet in raw.sheet_names:
             return XlsxEditResult(edit.action, "invalid", f"sheet {edit.sheet!r} already exists")
-        ws = wb.create_sheet(title=str(edit.sheet)[:31])
+        title = str(edit.sheet)[:31]
+        rows: list[list] = []
         if edit.headers:
-            ws.append(list(edit.headers))
+            rows.append(list(edit.headers))
         for row in edit.rows or []:
-            ws.append(list(row))
+            if not isinstance(row, (list, tuple)):
+                return XlsxEditResult(edit.action, "invalid", "rows entries must be lists")
+            rows.append(list(row))
+        try:
+            _add_raw_sheet(raw, title)
+            if rows:
+                raw.sheets[title].append_rows(rows)
+        except (TypeError, ValueError) as exc:
+            return XlsxEditResult(edit.action, "invalid", str(exc))
         return XlsxEditResult(edit.action, "applied")
 
-    if edit.sheet not in wb.sheetnames:
+    if edit.sheet not in raw.sheet_names:
         return XlsxEditResult(
             edit.action, "not_found",
-            f"sheet {edit.sheet!r} not in {wb.sheetnames}",
+            f"sheet {edit.sheet!r} not in {raw.sheet_names}",
         )
-    ws = wb[edit.sheet]
+    sheet = raw.sheets[edit.sheet]
 
     if edit.action == "set_cell":
         if not edit.cell or not _CELL_REF.match(edit.cell):
@@ -272,12 +319,16 @@ def _apply_one(wb, edit: XlsxEdit) -> XlsxEditResult:
             return XlsxEditResult(
                 edit.action, "invalid", f"column {col_letters!r} beyond Excel's XFD limit"
             )
-        target = ws[edit.cell.upper()]
+        ref = edit.cell.upper()
         if edit.old_value is not None:
-            current = "" if target.value is None else str(target.value)
+            value = sheet.get_cell(ref)
+            current = "" if value is None else str(value)
             if current.strip() != str(edit.old_value).strip():
                 return XlsxEditResult(edit.action, "stale", "cell value changed; refresh")
-        target.value = edit.value
+        try:
+            sheet.set_cell(ref, edit.value)
+        except (TypeError, ValueError) as exc:
+            return XlsxEditResult(edit.action, "invalid", str(exc))
         return XlsxEditResult(edit.action, "applied")
 
     if edit.action == "append_rows":
@@ -286,10 +337,69 @@ def _apply_one(wb, edit: XlsxEdit) -> XlsxEditResult:
         for row in edit.rows:
             if not isinstance(row, (list, tuple)):
                 return XlsxEditResult(edit.action, "invalid", "rows entries must be lists")
-            ws.append(list(row))
+        try:
+            sheet.append_rows([list(row) for row in edit.rows])
+        except (TypeError, ValueError) as exc:
+            return XlsxEditResult(edit.action, "invalid", str(exc))
         return XlsxEditResult(edit.action, "applied")
 
     return XlsxEditResult(edit.action, "invalid", f"unknown action {edit.action!r}")
+
+
+_WORKSHEET_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"
+)
+_WORKSHEET_REL_TYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"
+)
+# A schema-minimal worksheet (CT_Worksheet only requires <sheetData>) —
+# the same skeleton an openpyxl-written sheet reduces to.
+_MINIMAL_WORKSHEET_XML = (
+    b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+    b"<sheetData/></worksheet>"
+)
+
+
+def _add_raw_sheet(raw, title: str) -> None:
+    """Create an empty worksheet inside the raw package.
+
+    The raw layer has no ``add_sheet``, so wire the four OPC touchpoints
+    here: worksheet part, ``[Content_Types].xml`` override, workbook
+    rels entry, and the ``<sheet>`` element in ``xl/workbook.xml``.
+    Everything else in the package stays byte-identical.
+    """
+    from contextifier.raw import qn
+
+    package = raw.package
+    n = 1
+    while package.has_part(f"xl/worksheets/sheet{n}.xml"):
+        n += 1
+    part_name = f"xl/worksheets/sheet{n}.xml"
+    package.add_part(part_name, _MINIMAL_WORKSHEET_XML)
+    package.set_content_type_override(part_name, _WORKSHEET_CONTENT_TYPE)
+
+    workbook = raw.workbook  # XmlPart facade over xl/workbook.xml
+    rels = package.rels_for(workbook.name)
+    if rels is None:
+        raise ValueError("workbook has no relationships part")
+    rel_id = rels.next_id()
+    rels.add(rel_id, _WORKSHEET_REL_TYPE, f"worksheets/sheet{n}.xml")
+
+    sheets_el = workbook.find("s:sheets")
+    if sheets_el is None:
+        raise ValueError("workbook.xml has no <sheets> element")
+    sheet_ids = [
+        int(s.get("sheetId", "0"))
+        for s in sheets_el.findall(qn("s:sheet"))
+        if (s.get("sheetId") or "0").isdigit()
+    ]
+    sheet_el = sheets_el.makeelement(qn("s:sheet"), {})
+    sheet_el.set("name", title)
+    sheet_el.set("sheetId", str(max(sheet_ids, default=0) + 1))
+    sheet_el.set(qn("r:id"), rel_id)
+    sheets_el.append(sheet_el)
+    workbook.mark_dirty()
 
 
 def xlsx_preview(content: bytes, *, max_rows: int = 200) -> tuple[str, list[dict]]:

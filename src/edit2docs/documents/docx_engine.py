@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import io
 import re
-from dataclasses import dataclass, field
-from typing import Iterable
+from collections.abc import Iterable
+from dataclasses import dataclass
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -254,6 +254,15 @@ def docx_outline(content: bytes) -> list[dict]:
     Merged cells are reported once, at their top-left grid address (the
     same cell object python-docx returns for every covered position — and
     the address a ``replace`` edit actually mutates).
+
+    Additive planner-visibility fields:
+
+    * cells containing an inline image carry ``"has_image": True`` (and
+      image-only cells are listed even with empty text, so the planner
+      can see them);
+    * charts referenced from the document part are appended as
+      ``{"chart": i, "kind", "title"}`` entries (read-only, via
+      contextifier's ChartModel).
     """
     from docx.oxml.ns import qn
 
@@ -292,11 +301,32 @@ def docx_outline(content: bytes) -> list[dict]:
                     continue
                 seen.add(key)
                 text = cell.text.strip()
-                if text:
-                    outline.append(
-                        {"table": table_index, "row": r, "col": c, "text": text}
-                    )
+                has_image = (
+                    next(cell._tc.iter(qn("w:drawing"), qn("w:pict")), None)
+                    is not None
+                )
+                if text or has_image:
+                    entry = {"table": table_index, "row": r, "col": c, "text": text}
+                    if has_image:
+                        entry["has_image"] = True
+                    outline.append(entry)
+    outline.extend(_chart_outline(content))
     return outline
+
+
+def _chart_outline(content: bytes) -> list[dict]:
+    """Read-only chart summaries via contextifier (best-effort: outline
+    must never fail because a chart part is exotic)."""
+    try:
+        from contextifier import open_raw
+
+        raw = open_raw(content, extension="docx")
+        return [
+            {"chart": i, "kind": chart.kind, "title": chart.title}
+            for i, chart in enumerate(raw.charts)
+        ]
+    except Exception:
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -337,12 +367,26 @@ def _normalize(text: str) -> str:
 
 
 def apply_docx_edits(content: bytes, edits: Iterable[DocxEdit]) -> tuple[bytes, list[DocxEditResult]]:
-    """Apply edits; untouched paragraphs stay byte-identical.
+    """Apply edits losslessly via contextifier's raw layer.
+
+    Untouched parts stay byte-identical (only ``word/document.xml`` is
+    rewritten). Replaces are run-preserving: the first text run keeps
+    its formatting, in-paragraph/in-cell drawings and bookmarks survive,
+    multi-paragraph cells keep their layout, and hyperlink elements are
+    never deleted wholesale (dead ones emptied by the edit are stripped,
+    matching the old engine's no-stale-link intent).
 
     Per-edit soft failures (like the PPTX text editor): ``old_text``
     guards replaces with a whitespace-normalized comparison.
     """
-    document = Document(io.BytesIO(content))
+    from contextifier import open_raw
+
+    try:
+        raw = open_raw(content, extension="docx")
+    except Exception as exc:
+        raise ValueError(
+            f"DOCX could not be opened: {exc}. DOCX 파일을 열 수 없습니다."
+        ) from exc
     edit_list = list(edits)
     results: list[DocxEditResult | None] = [None] * len(edit_list)
 
@@ -355,97 +399,100 @@ def apply_docx_edits(content: bytes, edits: Iterable[DocxEdit]) -> tuple[bytes, 
         reverse=True,
     )
     for index, edit in ordered:
-        results[index] = _apply_one(document, edit)
+        results[index] = _apply_one(raw, edit)
 
-    buf = io.BytesIO()
-    document.save(buf)
-    return buf.getvalue(), [r for r in results if r is not None]
+    return raw.to_bytes(), [r for r in results if r is not None]
 
 
-def _apply_one(document, edit: DocxEdit) -> DocxEditResult:
+def _flatten(text: str) -> str:
+    return " ".join(text.split("\n"))
+
+
+def _apply_one(raw, edit: DocxEdit) -> DocxEditResult:
     if edit.action == "replace" and edit.table is not None:
         if edit.row is None or edit.col is None:
             return DocxEditResult(edit.action, "invalid", "table replace needs row+col")
         try:
-            cell = document.tables[edit.table].rows[edit.row].cells[edit.col]
+            cell = raw.tables[edit.table].cell(edit.row, edit.col)
         except IndexError:
             return DocxEditResult(edit.action, "not_found", "table cell out of range")
         if edit.old_text is not None and _normalize(cell.text) != _normalize(edit.old_text):
             return DocxEditResult(edit.action, "stale", "cell text changed; refresh")
-        _set_paragraph_text(cell.paragraphs[0], edit.new_text)
-        for extra in cell.paragraphs[1:]:
-            _set_paragraph_text(extra, "")
+        # Run/layout-preserving: paragraphs holding drawings/pictures stay
+        # untouched, other paragraphs are emptied but never removed.
+        cell.set_text(_flatten(edit.new_text))
         return DocxEditResult(edit.action, "applied")
 
+    paragraphs = raw.paragraphs
     para_ok = (
         edit.para is not None
-        and 0 <= edit.para < len(document.paragraphs)
+        and 0 <= edit.para < len(paragraphs)
     ) or (edit.action == "insert_after" and edit.para == -1)
     if not para_ok:
         return DocxEditResult(edit.action, "not_found", "paragraph index out of range")
 
     if edit.action == "replace":
-        paragraph = document.paragraphs[edit.para]
-        if edit.old_text is not None and _normalize(paragraph.text) != _normalize(edit.old_text):
+        current = paragraphs[edit.para].text
+        if edit.old_text is not None and _normalize(current) != _normalize(edit.old_text):
             return DocxEditResult(edit.action, "stale", "paragraph text changed; refresh")
-        _set_paragraph_text(paragraph, edit.new_text)
+        raw.set_paragraph_text(edit.para, _flatten(edit.new_text))
+        # Links whose text this edit emptied are dead — drop them (and
+        # their now-unreferenced relationships); links that carry the new
+        # text (hyperlink-only paragraphs) survive.
+        raw.strip_empty_hyperlinks(edit.para)
         return DocxEditResult(edit.action, "applied")
 
     if edit.action == "delete":
-        paragraph = document.paragraphs[edit.para]
-        p = paragraph._p
-        p.getparent().remove(p)
+        raw.delete_paragraph(edit.para)
         return DocxEditResult(edit.action, "applied")
 
     if edit.action == "insert_after":
-        rendered = Document(io.BytesIO(docx_from_markdown(edit.markdown or edit.new_text)))
-        # Harvest block elements (paragraphs AND tables) in document order;
-        # skip empty paragraphs and the section properties element.
-        from docx.oxml.ns import qn as _qn
-
-        new_elements = []
-        for element in rendered.element.body:
-            if element.tag == _qn("w:sectPr"):
-                continue
-            if element.tag == _qn("w:p") and not "".join(element.itertext()).strip():
-                continue
-            new_elements.append(element)
+        new_elements = _fragment_blocks(docx_from_markdown(edit.markdown or edit.new_text))
         if not new_elements:
             return DocxEditResult(edit.action, "invalid", "nothing to insert")
+        document_part = raw.xml_part("word/document.xml")
+        body = document_part.find("w:body")
+        para_els = [p.element for p in paragraphs]
         if edit.para == -1:
-            anchor = document.paragraphs[0]._p if document.paragraphs else None
+            anchor = para_els[0] if para_els else None
             for element in new_elements:
                 if anchor is None:
-                    document.element.body.append(element)
+                    body.append(element)
                 else:
                     anchor.addprevious(element)
         else:
-            anchor = document.paragraphs[edit.para]._p
+            anchor = para_els[edit.para]
             for element in reversed(new_elements):
                 anchor.addnext(element)
+        document_part.mark_dirty()
         return DocxEditResult(edit.action, "applied")
 
     return DocxEditResult(edit.action, "invalid", f"unknown action {edit.action!r}")
 
 
-def _set_paragraph_text(paragraph, new_text: str) -> None:
-    """First run keeps its formatting; the rest are emptied.
+def _fragment_blocks(fragment: bytes) -> list:
+    """Body-level block elements (paragraphs AND tables) of a rendered
+    markdown fragment, in document order; the section properties element
+    and empty paragraphs are skipped (same rules as the python-docx-era
+    grafting this replaces)."""
+    import zipfile
 
-    Hyperlink children (``w:hyperlink``) hold their own runs that
-    ``paragraph.runs`` doesn't expose — remove them so the old link text
-    doesn't survive next to the replacement.
-    """
-    from docx.oxml.ns import qn
+    from contextifier.raw import qn
+    from lxml import etree
 
-    for hyperlink in paragraph._p.findall(qn("w:hyperlink")):
-        paragraph._p.remove(hyperlink)
-    text = " ".join(new_text.split("\n"))
-    if paragraph.runs:
-        paragraph.runs[0].text = text
-        for run in paragraph.runs[1:]:
-            run.text = ""
-    else:
-        paragraph.add_run(text)
+    with zipfile.ZipFile(io.BytesIO(fragment)) as zf:
+        root = etree.fromstring(zf.read("word/document.xml"))
+    body = root.find(qn("w:body"))
+    if body is None:
+        return []
+    blocks = []
+    for element in body:
+        if element.tag == qn("w:sectPr"):
+            continue
+        if element.tag == qn("w:p") and not "".join(element.itertext()).strip():
+            continue
+        blocks.append(element)
+    return blocks
 
 
 _SAFE_HREF = re.compile(r"^(https?:|mailto:)", re.IGNORECASE)
