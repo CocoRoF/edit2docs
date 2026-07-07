@@ -21,7 +21,16 @@ class _ScriptedLLM:
     calls: list[dict] = field(default_factory=list)
 
     async def complete(self, system_prompt, user_message, **kwargs):
-        self.calls.append({"system": system_prompt, "user": user_message})
+        # Capture the volatile tail (user_suffix) + resolved model so tests
+        # can assert the retry-cache shape and model tiering.
+        self.calls.append(
+            {
+                "system": system_prompt,
+                "user": user_message,
+                "user_suffix": kwargs.get("user_suffix", ""),
+                "model": kwargs.get("model"),
+            }
+        )
         text = self.outputs[min(len(self.calls) - 1, len(self.outputs) - 1)]
         return LLMResult(
             text=text,

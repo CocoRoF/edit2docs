@@ -10,21 +10,23 @@ failure in the reply instead of promising changes.
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Literal
 
 from pydantic import Field
 
+from ..config import resolve_model
 from ..documents.docx_engine import DocxEdit, apply_docx_edits, docx_outline
 from ..documents.xlsx_engine import XlsxEdit, apply_xlsx_edits, xlsx_outline
-from ..llm import AnthropicClient, DEFAULT_MODEL, build_output_lang_directive, load_prompt
+from ..llm import DEFAULT_MODEL, AnthropicClient, build_output_lang_directive, load_prompt
 from ._edit_events import op_event_vars, op_summary, plan_event_vars
 from ._reply_texts import reply_text
 from .edit_deck import ChatTurn, _cost_from_usage, _parse_plan
 from .generate_deck import EventCallback, StageEvent, _emit, _merge_cost
 from .types import (
-    CostBreakdown,
     DEFAULT_LANG,
+    CostBreakdown,
     LangCode,
     ToolRequest,
     ToolResponse,
@@ -35,6 +37,30 @@ DocFormat = Literal["docx", "xlsx"]
 
 _PLANNER_ROLE = {"docx": "doc-editor-planner", "xlsx": "sheet-editor-planner"}
 _MAX_OPERATIONS = 30
+
+# Retry reminder for a plan-missing first response. Passed as the LLM call's
+# ``user_suffix`` (the volatile tail) so the stable ``user`` prefix — the
+# outline + sources + history, unbounded on a large docx — stays
+# byte-identical between the first call and the retry and is READ from cache
+# on the retry instead of re-sent at full price.
+_PLAN_REMINDER = (
+    "\n\n# REMINDER\nYour previous answer was missing the "
+    "```edit_plan fenced block. Respond again following the "
+    "output format EXACTLY (operations: [] only if truly no "
+    "change is needed)."
+)
+
+# Above this outline size (characters), _outline_context emits a WINDOWED
+# outline (headings skeleton + a paragraph window around a relevance anchor)
+# instead of the full, unbounded paragraph listing — which is re-sent every
+# turn and grows linearly with the document (300 paras ≈ 19k tokens).
+_OUTLINE_CHAR_BUDGET = 40000
+# When windowing, how many full paragraph lines to keep at the head and tail
+# (when there is no in-text anchor), and the half-width of the window we
+# center on an anchor paragraph.
+_WINDOW_HEAD = 40
+_WINDOW_TAIL = 20
+_ANCHOR_RADIUS = 30
 
 
 class EditDocRequest(ToolRequest):
@@ -68,7 +94,7 @@ async def edit_document(
         on_event,
         StageEvent(stage="planning_edits", progress=0.2, message_key="stages.planning_edits"),
     )
-    outline_text = _outline_context(req)
+    outline_text = _outline_context(req, warnings)
     client = AnthropicClient(api_key=req.anthropic_api_key, model=req.model)
     system = (
         build_output_lang_directive(req.lang)
@@ -77,29 +103,27 @@ async def edit_document(
     )
     user = _build_user_message(req, outline_text)
 
+    planner_model = resolve_model("planner", req.model)
     result = await client.complete(
         system_prompt=system,
         user_message=user,
         max_output_tokens=16384,
         cache_system=True,
-        model=req.model,
+        model=planner_model,
     )
     cost = _merge_cost(cost, _cost_from_usage(result.usage))
     reply, raw_ops, plan_missing = _parse_plan(result.text, warnings, lang=req.lang)
 
     if plan_missing:
+        # Retry re-sends the SAME ``user`` (cache read) with the reminder in
+        # ``user_suffix`` — no re-paying for the outline/sources/history.
         retry = await client.complete(
             system_prompt=system,
-            user_message=(
-                user
-                + "\n\n# REMINDER\nYour previous answer was missing the "
-                "```edit_plan fenced block. Respond again following the "
-                "output format EXACTLY (operations: [] only if truly no "
-                "change is needed)."
-            ),
+            user_message=user,
+            user_suffix=_PLAN_REMINDER,
             max_output_tokens=16384,
             cache_system=True,
-            model=req.model,
+            model=planner_model,
         )
         cost = _merge_cost(cost, _cost_from_usage(retry.usage))
         reply, raw_ops, plan_missing = _parse_plan(retry.text, warnings, lang=req.lang)
@@ -176,21 +200,13 @@ async def edit_document(
 # ---------------------------------------------------------------------------
 
 
-def _outline_context(req: EditDocRequest) -> str:
+def _outline_context(req: EditDocRequest, warnings: list[WarningEntry]) -> str:
     if req.fmt == "docx":
-        lines = ["# Document outline (paragraph addresses)"]
-        for entry in docx_outline(req.content):
-            if "para" in entry:
-                lines.append(
-                    f"- para {entry['para']} [{entry['style']}]: {entry['text'][:160]}"
-                )
-            else:
-                lines.append(
-                    f"- table {entry['table']} cell ({entry['row']},{entry['col']}): "
-                    f"{entry['text'][:120]}"
-                )
-        return "\n".join(lines)
+        return _docx_outline_context(req, warnings)
 
+    # xlsx is already sample-bounded (sample_rows caps the per-sheet body),
+    # so its outline size is independent of the workbook's row count — no
+    # windowing needed here.
     lines = ["# Workbook outline"]
     for sheet in xlsx_outline(req.content, sample_rows=12)["sheets"]:
         lines.append(
@@ -202,6 +218,153 @@ def _outline_context(req: EditDocRequest) -> str:
             )
             lines.append(f"- row {r}: {rendered[:200]}")
     return "\n".join(lines)
+
+
+def _outline_line(entry: dict) -> str:
+    """Render one docx_outline entry in the exact address format the planner's
+    edit ops resolve against (``para N [style]: text`` / table / chart)."""
+    if "para" in entry:
+        return f"- para {entry['para']} [{entry['style']}]: {entry['text'][:160]}"
+    if "table" in entry:
+        return (
+            f"- table {entry['table']} cell ({entry['row']},{entry['col']}): "
+            f"{entry['text'][:120]}"
+        )
+    # Read-only chart summary appended by docx_outline.
+    return f"- chart {entry.get('chart')} [{entry.get('kind')}]: {entry.get('title') or ''}"
+
+
+def _is_heading(style: str | None) -> bool:
+    s = (style or "").strip().lower()
+    return s.startswith("heading") or s in ("title", "subtitle")
+
+
+def _docx_outline_context(req: EditDocRequest, warnings: list[WarningEntry]) -> str:
+    """Docx outline, windowed when it would blow the token budget.
+
+    Small documents (full outline under ``_OUTLINE_CHAR_BUDGET``) are sent
+    verbatim — no behaviour change. A large document (unbounded, linear in
+    paragraph count, and re-sent every turn) instead gets a WINDOWED view:
+    the full heading/table skeleton is always present, plus a window of full
+    paragraph lines around a relevance anchor. Omitted runs collapse into a
+    marker, and a ``WarningEntry("outline_windowed", ...)`` is emitted. Every
+    rendered line keeps the exact ``para N [style]`` address format so edit
+    ops still resolve.
+    """
+    entries = docx_outline(req.content)
+    full = "\n".join(
+        ["# Document outline (paragraph addresses)"]
+        + [_outline_line(e) for e in entries]
+    )
+    if len(full) <= _OUTLINE_CHAR_BUDGET:
+        return full
+
+    # Ordinal of each paragraph within the paragraph sequence (para indices
+    # themselves are non-contiguous — empty paragraphs are skipped upstream).
+    para_ordinal = {
+        e["para"]: j
+        for j, e in enumerate(e for e in entries if "para" in e)
+    }
+    total_paras = len(para_ordinal)
+
+    anchors = _anchor_para_indices(req, entries)
+    keep_ordinals: set[int] = set()
+    if anchors:
+        for para_idx in anchors:
+            o = para_ordinal.get(para_idx)
+            if o is not None:
+                keep_ordinals.update(range(o - _ANCHOR_RADIUS, o + _ANCHOR_RADIUS + 1))
+    else:
+        keep_ordinals.update(range(0, _WINDOW_HEAD))
+        keep_ordinals.update(range(total_paras - _WINDOW_TAIL, total_paras))
+
+    out = [
+        "# Document outline (paragraph addresses) — WINDOWED (large document)",
+        "# Showing every heading and table, plus a window of full paragraphs "
+        "around the referenced location.",
+        "# Ask to see a specific paragraph range (e.g. \"show paras 200-260\") "
+        "for anything shown as omitted.",
+    ]
+    omitted = 0
+    shown_paras = 0
+
+    def _flush() -> None:
+        nonlocal omitted
+        if omitted:
+            out.append(
+                f"… ({omitted} paragraphs omitted; ask to see a specific range)"
+            )
+            omitted = 0
+
+    for e in entries:
+        if "para" not in e:
+            _flush()
+            out.append(_outline_line(e))  # tables / charts: always shown
+            continue
+        if _is_heading(e["style"]) or para_ordinal[e["para"]] in keep_ordinals:
+            _flush()
+            out.append(_outline_line(e))
+            shown_paras += 1
+        else:
+            omitted += 1
+    _flush()
+
+    warnings.append(
+        WarningEntry(
+            code="outline_windowed",
+            message=(
+                f"Document outline ({total_paras} paragraphs) exceeded the "
+                f"{_OUTLINE_CHAR_BUDGET}-char budget; sent a windowed view "
+                f"({shown_paras} paragraphs shown). Ask to see a specific "
+                "range for the rest."
+            ),
+            detail={
+                "total_paragraphs": total_paras,
+                "shown_paragraphs": shown_paras,
+                "char_budget": _OUTLINE_CHAR_BUDGET,
+                "anchored": bool(anchors),
+            },
+        )
+    )
+    return "\n".join(out)
+
+
+_PARA_REF = re.compile(r"\bpara(?:graph)?\.?\s*#?\s*(\d+)", re.IGNORECASE)
+_PARA_REF_KO = re.compile(r"(\d+)\s*번?\s*(?:문단|단락)")
+_QUOTED = re.compile(r"[\"'“”‘’]([^\"'“”‘’]{4,})[\"'“”‘’]")
+
+
+def _anchor_para_indices(req: EditDocRequest, entries: list[dict]) -> set[int]:
+    """Paragraph indices the instruction/chat points at, to center a window.
+
+    Two signals: an explicit paragraph number ("para 250", "250번 문단") and
+    quoted text that matches a paragraph's body. Only indices that actually
+    exist in the outline are returned.
+    """
+    text_parts = [req.instruction]
+    text_parts += [t.content for t in req.chat_history[-12:]]
+    text = "\n".join(text_parts)
+
+    valid = {e["para"] for e in entries if "para" in e}
+    anchors: set[int] = set()
+    for m in _PARA_REF.finditer(text):
+        n = int(m.group(1))
+        if n in valid:
+            anchors.add(n)
+    for m in _PARA_REF_KO.finditer(text):
+        n = int(m.group(1))
+        if n in valid:
+            anchors.add(n)
+
+    quotes = [q.strip().lower() for q in _QUOTED.findall(text)]
+    if quotes:
+        for e in entries:
+            if "para" not in e:
+                continue
+            body = e["text"].lower()
+            if any(q and q in body for q in quotes):
+                anchors.add(e["para"])
+    return anchors
 
 
 def _build_user_message(req: EditDocRequest, outline: str) -> str:
@@ -295,7 +458,9 @@ def _apply(
 
     applied: list[dict] = []
     op_results: list[tuple[dict, str]] = []
-    for raw, result in zip(valid_raw, results):
+    # valid_raw and results are built in lockstep (one result per accepted
+    # edit); strict=False preserves the pre-existing lenient pairing.
+    for raw, result in zip(valid_raw, results, strict=False):
         op_results.append((raw, result.status))
         summary = {"action": result.action, "status": result.status}
         if result.status == "applied":

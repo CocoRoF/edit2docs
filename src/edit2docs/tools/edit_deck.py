@@ -29,6 +29,7 @@ from xml.etree import ElementTree as ET
 import yaml
 from pydantic import Field
 
+from ..config import resolve_model
 from ..core.svg_to_pptx.layout_repair import repair_layout
 from ..core.svg_to_pptx.pptx_edit import KeepSlide, NewSlide, recompose_pptx
 from ..core.svg_to_pptx.svg_scale import scale_svg_to_viewbox
@@ -90,6 +91,20 @@ class EditDeckResponse(ToolResponse):
     warnings: list[WarningEntry] = Field(default_factory=list)
 
 
+# Retry reminder for a plan-missing first response. Passed as the LLM
+# call's ``user_suffix`` (the volatile tail) so the large ``planner_user``
+# prefix — deck outline + sources + history, up to ~19k tokens — stays
+# byte-identical between the first call and the retry and is READ from cache
+# on the retry instead of re-sent at full price.
+_PLAN_REMINDER = (
+    "\n\n# REMINDER\nYour previous answer was missing the "
+    "```edit_plan fenced block. Respond again following the "
+    "output format EXACTLY: a ```reply block, then a "
+    "```edit_plan block (operations: [] only if truly no "
+    "change is needed)."
+)
+
+
 async def edit_deck(
     req: EditDeckRequest,
     *,
@@ -138,12 +153,13 @@ async def edit_deck(
         sources_markdown=sources_markdown,
         slide_natives=slide_natives,
     )
+    planner_model = resolve_model("planner", req.model)
     result = await client.complete(
         system_prompt=planner_system,
         user_message=planner_user,
         max_output_tokens=16384,
         cache_system=True,
-        model=req.model,
+        model=planner_model,
     )
     cost = _merge_cost(cost, _cost_from_usage(result.usage))
     reply, operations, plan_missing = _parse_plan(result.text, warnings, lang=req.lang)
@@ -151,20 +167,16 @@ async def edit_deck(
     # The model occasionally answers conversationally ("...하겠습니다") and
     # forgets the edit_plan block entirely. Without a retry the user sees a
     # promise followed by zero changes — retry once with a hard reminder.
+    # The retry re-sends the SAME ``planner_user`` (cache read) and carries
+    # the reminder in ``user_suffix`` so we don't re-pay for the whole prompt.
     if plan_missing:
         retry_result = await client.complete(
             system_prompt=planner_system,
-            user_message=(
-                planner_user
-                + "\n\n# REMINDER\nYour previous answer was missing the "
-                "```edit_plan fenced block. Respond again following the "
-                "output format EXACTLY: a ```reply block, then a "
-                "```edit_plan block (operations: [] only if truly no "
-                "change is needed)."
-            ),
+            user_message=planner_user,
+            user_suffix=_PLAN_REMINDER,
             max_output_tokens=16384,
             cache_system=True,
-            model=req.model,
+            model=planner_model,
         )
         cost = _merge_cost(cost, _cost_from_usage(retry_result.usage))
         reply, operations, plan_missing = _parse_plan(retry_result.text, warnings, lang=req.lang)
