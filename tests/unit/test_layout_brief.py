@@ -174,30 +174,42 @@ def test_yaml_text_includes_role_names_model_recognises():
 
 def test_user_message_carries_brief_first():
     """When the request has a layout_brief_yaml, it appears in the
-    Executor's user_message BEFORE spec_lock and page content so the
-    LLM sees the constraints first."""
-    from edit2docs.tools.execute import _build_user_message, ExecutePageRequest
+    Executor's user_message BEFORE the page content so the LLM sees the
+    constraints first.
+
+    Token optimization: spec_lock is no longer inlined in the per-page
+    user message — it now rides in the cached system suffix
+    (`_build_spec_lock_suffix`), written once and read back per page.
+    So we assert the brief precedes page content and spec_lock is absent
+    from the user message but present in the suffix.
+    """
+    from edit2docs.tools.execute import (
+        _build_spec_lock_suffix,
+        _build_user_message,
+        ExecutePageRequest,
+    )
 
     brief = build_layout_briefs(spec_lock="", page_count=1)[0]
-    msg = _build_user_message(
-        ExecutePageRequest(
-            spec_lock="lang: ko-KR\n",
-            page_index=0,
-            page_summary="test",
-            lang="ko-KR",
-            anthropic_api_key="x",
-            layout_brief_yaml=render_brief_yaml(brief),
-        )
+    req = ExecutePageRequest(
+        spec_lock="lang: ko-KR\n",
+        page_index=0,
+        page_summary="test",
+        lang="ko-KR",
+        anthropic_api_key="x",
+        layout_brief_yaml=render_brief_yaml(brief),
     )
-    # Brief precedes spec_lock.
+    msg = _build_user_message(req)
+    # Brief precedes page content; spec_lock has moved to the suffix.
     brief_pos = msg.find("Layout brief")
-    spec_pos = msg.find("spec_lock")
     content_pos = msg.find("Page content")
-    assert 0 < brief_pos < spec_pos < content_pos
+    assert 0 < brief_pos < content_pos
+    assert "spec_lock" not in msg
+    assert "spec_lock" in _build_spec_lock_suffix(req.spec_lock)
 
 
 def test_user_message_without_brief_unchanged():
-    """Legacy requests (no brief) get the previous message shape."""
+    """Legacy requests (no brief) get the previous message shape, minus
+    the spec_lock block (now delivered via the cached system suffix)."""
     from edit2docs.tools.execute import _build_user_message, ExecutePageRequest
 
     msg = _build_user_message(
@@ -210,4 +222,6 @@ def test_user_message_without_brief_unchanged():
         )
     )
     assert "Layout brief" not in msg
-    assert "spec_lock" in msg
+    # spec_lock moved to the cached system suffix (token optimization).
+    assert "spec_lock" not in msg
+    assert "Page content" in msg

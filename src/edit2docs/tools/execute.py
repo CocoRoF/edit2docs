@@ -18,6 +18,7 @@ from typing import Literal
 
 from pydantic import Field
 
+from ..config import resolve_model
 from ..llm import AnthropicClient, DEFAULT_MODEL, build_output_lang_directive, load_prompt
 from ..llm.anthropic_client import LLMResult, LLMUsage
 from .strategize import LLMCallable
@@ -97,7 +98,11 @@ async def execute_page(
         user_message=user_message,
         max_output_tokens=8192,
         cache_system=True,
-        model=req.model,
+        model=resolve_model("executor", req.model),
+        # spec_lock is identical for every page in a deck, so it rides in a
+        # cached system suffix (written once, read back on every page)
+        # instead of being re-sent inside each per-page user message.
+        system_suffix=_build_spec_lock_suffix(req.spec_lock),
     )
 
     svg, notes = _parse_output(result.text, warnings)
@@ -158,6 +163,13 @@ async def execute_batch(
     page gets a placeholder SVG so subsequent stages — quality, export —
     still see N slides). This preserves the rest of the deck when one
     Executor call goes sideways.
+
+    Cache warm-up: the shared prompt cache (executor system prompt +
+    spec_lock suffix) is written by the FIRST page that runs. If all pages
+    fan out at once, the first ``max_concurrency`` pages each race the
+    write and re-pay it (~2x waste on the shared prefix). So we run page 0
+    to completion first — warming the cache — then fan out the rest, which
+    read the warmed prefix. A single-page batch is unaffected.
     """
     started = time.perf_counter()
     sem = asyncio.Semaphore(req.max_concurrency)
@@ -166,9 +178,21 @@ async def execute_batch(
         async with sem:
             return await execute_page(p, client=client)
 
-    raw_results = await asyncio.gather(
-        *[_run_one(p) for p in req.pages], return_exceptions=True
-    )
+    raw_results: list = []
+    if req.pages:
+        # Warm-up: first page awaited alone so the shared cache is written
+        # before the fan-out reads it. Capture its exception the same way
+        # `gather(return_exceptions=True)` would, so a failed warm-up still
+        # yields a placeholder + warning (and the rest still fan out).
+        try:
+            raw_results.append(await execute_page(req.pages[0], client=client))
+        except Exception as exc:  # noqa: BLE001 — mirrors gather's capture
+            raw_results.append(exc)
+        if len(req.pages) > 1:
+            rest = await asyncio.gather(
+                *[_run_one(p) for p in req.pages[1:]], return_exceptions=True
+            )
+            raw_results.extend(rest)
 
     results: list[ExecutePageResponse] = []
     warnings: list[WarningEntry] = []
@@ -274,24 +298,33 @@ def _build_system_prompt(style: ExecutorStyle, lang: LangCode) -> str:
     return f"{directive}\n\n---\n\n{base}\n\n---\n\n{brief_directive}\n\n---\n\n{variant}"
 
 
+def _build_spec_lock_suffix(spec_lock: str) -> str:
+    """Render the deck-wide spec_lock as a cached system suffix.
+
+    spec_lock is identical for every page in a deck, so it belongs in a
+    cached system block (see ``AnthropicClient.complete(system_suffix=)``)
+    that pairs with the executor system prompt as one cached prefix —
+    written once, read back on every subsequent page — rather than being
+    re-sent (uncached) inside each per-page user message.
+    """
+    return "## spec_lock\n```yaml\n" + spec_lock.strip() + "\n```"
+
+
 def _build_user_message(req: ExecutePageRequest) -> str:
     lines: list[str] = []
     lines.append(f"# Page {req.page_index} ({req.lang})")
     lines.append("")
-    # Layout brief comes BEFORE spec_lock and page content. This is
-    # the hard-constraint section: the LLM should place every shape
-    # inside the declared zones rather than inventing coordinates.
+    # Layout brief comes BEFORE page content. This is the per-page
+    # hard-constraint section: the LLM should place every shape inside
+    # the declared zones rather than inventing coordinates. (spec_lock is
+    # no longer inlined here — it rides in the cached system suffix; see
+    # `_build_spec_lock_suffix`.)
     if req.layout_brief_yaml:
         lines.append("## Layout brief (HARD constraint — use these bounding boxes)")
         lines.append("```yaml")
         lines.append(req.layout_brief_yaml.strip())
         lines.append("```")
         lines.append("")
-    lines.append("## spec_lock")
-    lines.append("```yaml")
-    lines.append(req.spec_lock.strip())
-    lines.append("```")
-    lines.append("")
     lines.append("## Page content")
     lines.append(req.page_summary.strip())
     lines.append("")

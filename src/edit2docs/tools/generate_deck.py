@@ -183,6 +183,11 @@ class GenerateDeckResponse(ToolResponse):
     detected_langs: list[LangCode]
     quality_issues: list[QualityIssue]
     cost: CostBreakdown
+    # Per-stage token attribution so operators can see WHERE spend went
+    # (strategize / execute / quality / export / …). Additive: the
+    # aggregate `cost` field above is unchanged. Maps stage name ->
+    # {input_tokens, output_tokens, cache_read_tokens, cache_write_tokens}.
+    stage_costs: dict[str, dict] = Field(default_factory=dict)
     # Structural snapshot of the assembled deck (see
     # ``_export_metrics.ExportMetrics``). Optional so older callers
     # / tests that don't pass through the export stage still construct
@@ -200,6 +205,10 @@ async def generate_deck(
     started = time.perf_counter()
     warnings: list[WarningEntry] = []
     cost = CostBreakdown()
+    # Per-stage token attribution (item 5). Populated alongside the running
+    # aggregate `cost` so operators can see where spend accrued. Retry
+    # execute/quality rounds fold into their base stage.
+    stage_costs: dict[str, CostBreakdown] = {}
 
     await _emit(on_event, StageEvent(stage="queued", progress=0.0, message_key="stages.queued"))
 
@@ -215,6 +224,7 @@ async def generate_deck(
             *(asyncio.to_thread(convert_to_markdown, src) for src in req.sources)
         )
         cost = _merge_cost(cost, *[r.cost for r in convert_results])
+        _record_stage_cost(stage_costs, "convert", *[r.cost for r in convert_results])
         for r in convert_results:
             warnings.extend(r.warnings)
         sources_markdown = [r.markdown for r in convert_results]
@@ -258,6 +268,7 @@ async def generate_deck(
             AnalyzeTemplateRequest(pptx=req.template_pptx, deck_mode=deck_mode),
         )
         cost = _merge_cost(cost, template_analysis.cost)
+        _record_stage_cost(stage_costs, "analyze_template", template_analysis.cost)
         warnings.extend(template_analysis.warnings)
         template_context = template_analysis.template_context
         if template_analysis.canvas_format != canvas_format:
@@ -296,6 +307,7 @@ async def generate_deck(
         client=client,
     )
     cost = _merge_cost(cost, strat.cost)
+    _record_stage_cost(stage_costs, "strategize", strat.cost)
     warnings.extend(strat.warnings)
 
     page_summaries = _split_page_plan(
@@ -467,6 +479,7 @@ async def generate_deck(
         client=client,
     )
     cost = _merge_cost(cost, exec_batch.cost)
+    _record_stage_cost(stage_costs, "execute", exec_batch.cost)
     warnings.extend(exec_batch.warnings)
 
     # Stage 5: quality check (with optional retry-on-error)
@@ -477,6 +490,7 @@ async def generate_deck(
     page_results = {p.page_index: p for p in exec_batch.results}
     quality_resp = _run_quality_check(page_results, canvas_format, image_bytes_by_filename)
     cost = _merge_cost(cost, quality_resp.cost)
+    _record_stage_cost(stage_costs, "quality", quality_resp.cost)
 
     # Layout-repair surfaced its findings on each page's `warnings`
     # list. Anything that couldn't be auto-fixed (`fix_applied=False`)
@@ -596,6 +610,7 @@ async def generate_deck(
             client=client,
         )
         cost = _merge_cost(cost, retry_batch.cost)
+        _record_stage_cost(stage_costs, "execute", retry_batch.cost)
         warnings.extend(retry_batch.warnings)
         for r in retry_batch.results:
             page_results[r.page_index] = r
@@ -605,6 +620,7 @@ async def generate_deck(
 
         quality_resp = _run_quality_check(page_results, canvas_format, image_bytes_by_filename)
         cost = _merge_cost(cost, quality_resp.cost)
+        _record_stage_cost(stage_costs, "quality", quality_resp.cost)
         _promote_layout_violations(page_results, quality_resp)
 
     # Surface unresolved quality errors and (when configured) hard-fail.
@@ -719,6 +735,7 @@ async def generate_deck(
         )
     )
     cost = _merge_cost(cost, export_resp.cost)
+    _record_stage_cost(stage_costs, "export", export_resp.cost)
     warnings.extend(export_resp.warnings)
 
     cost = CostBreakdown(
@@ -773,6 +790,7 @@ async def generate_deck(
         quality_issues=quality_resp.issues,
         export_metrics=export_metrics.to_dict(),
         cost=cost,
+        stage_costs=_stage_costs_to_dict(stage_costs),
         warnings=warnings,
     )
 
@@ -842,18 +860,63 @@ _RETRY_HINTS: dict[str, str] = {
 }
 
 
+# Layout-violation severity gate (token optimization). An unfixed layout
+# violation only PROMOTES to a retry-worthy quality error when it's
+# STRUCTURALLY broken — a full page re-generation is expensive (~70% of a
+# retry's spend is wasted when the trigger is cosmetic). Sub-threshold
+# violations stay as page warnings the operator can see, but they don't
+# drive a retry:
+#   * off_canvas          — always structural (content spills off the slide).
+#   * text_overflow_x      — structural only when the text needs meaningfully
+#                            more width than its box (required_w / box_w).
+#   * overlap              — structural only when the boxes overlap heavily.
+_OVERLAP_PROMOTE_RATIO = 0.5        # promote overlaps above 50% IoU
+_TEXT_OVERFLOW_PROMOTE_RATIO = 1.15  # promote overflow needing >1.15x the box
+
+
+def _layout_violation_is_structural(code: str, detail: dict) -> bool:
+    """True when an unfixed layout violation is broken enough to justify a
+    (costly) page re-generation, per the severity thresholds above.
+
+    Missing measurements degrade to "promote" — we can't prove the
+    violation is cosmetic, so the safe move is to let the retry fire.
+    """
+    kind = code[len("layout_"):] if code.startswith("layout_") else code
+    actual = detail.get("actual") if isinstance(detail, dict) else None
+    if not isinstance(actual, dict):
+        actual = {}
+    if kind == "off_canvas":
+        return True
+    if kind == "text_overflow_x":
+        req_w = actual.get("required_w")
+        box_w = actual.get("box_w")
+        if req_w and box_w and box_w > 0:
+            return (req_w / box_w) > _TEXT_OVERFLOW_PROMOTE_RATIO
+        return True  # unmeasurable → treat as structural
+    if kind == "overlap":
+        ratio = actual.get("overlap_ratio")
+        if ratio is None:
+            return True  # unmeasurable → treat as structural
+        return ratio > _OVERLAP_PROMOTE_RATIO
+    # Anything else (e.g. empty_decoration) is cosmetic / already repaired.
+    return False
+
+
 def _promote_layout_violations(
     page_results: dict,
     quality_resp,
 ) -> None:
-    """Convert unfixed layout violations from per-page warnings into
-    quality errors so the retry loop targets them.
+    """Convert unfixed *structural* layout violations from per-page
+    warnings into quality errors so the retry loop targets them.
 
     Auto-fixed violations (the repair pass mutated the SVG) stay as
     informational warnings — the operator can see what we changed,
-    but the model doesn't need to re-attempt. Only when the repair
-    couldn't safely fix the violation do we ask the model for a
-    better attempt.
+    but the model doesn't need to re-attempt. Of the unfixed ones, only
+    STRUCTURALLY broken violations (off_canvas, heavy overflow/overlap;
+    see `_layout_violation_is_structural`) promote to a retry-worthy
+    quality error. Minor cosmetic violations (small overlaps,
+    sub-threshold overflow) stay as page warnings — re-generating a whole
+    page to nudge a barely-visible overlap is not worth the tokens.
 
     The measured coordinates from `detail.actual` are embedded into
     the message string so the downstream retry hint can quote them
@@ -869,6 +932,10 @@ def _promote_layout_violations(
                 continue
             detail = getattr(w, "detail", None) or {}
             if detail.get("fix_applied") is True:
+                continue
+            # Severity gate: only structurally-broken violations promote.
+            # Cosmetic ones remain as the page warning already surfaced.
+            if not _layout_violation_is_structural(code, detail):
                 continue
             quality_resp.issues.append(
                 QualityIssue(
@@ -1490,6 +1557,33 @@ async def _emit(callback: EventCallback, event: StageEvent) -> None:
     result = callback(event)
     if asyncio.iscoroutine(result):
         await result
+
+
+def _record_stage_cost(
+    stage_costs: dict[str, CostBreakdown],
+    stage: str,
+    *costs: CostBreakdown,
+) -> None:
+    """Fold *costs* into the running per-stage total for *stage*.
+
+    Retry rounds re-call this for "execute" / "quality" so a stage's
+    entry reflects total spend across the initial pass plus every retry.
+    """
+    stage_costs[stage] = _merge_cost(stage_costs.get(stage, CostBreakdown()), *costs)
+
+
+def _stage_costs_to_dict(stage_costs: dict[str, CostBreakdown]) -> dict[str, dict]:
+    """Project the per-stage CostBreakdowns to the token-only dicts the
+    response exposes (the four billable token counters)."""
+    return {
+        stage: {
+            "input_tokens": c.input_tokens,
+            "output_tokens": c.output_tokens,
+            "cache_read_tokens": c.cache_read_tokens,
+            "cache_write_tokens": c.cache_write_tokens,
+        }
+        for stage, c in stage_costs.items()
+    }
 
 
 def _merge_cost(base: CostBreakdown, *others: CostBreakdown) -> CostBreakdown:
