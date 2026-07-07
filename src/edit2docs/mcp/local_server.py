@@ -134,8 +134,10 @@ def build_local_mcp_server() -> FastMCP:
     @mcp.tool(
         name="set_doc_text",
         description=(
-            "Deterministic targeted edits (instant, no LLM, formatting "
-            "preserved). Addresses come from analyze_doc: .docx -> "
+            "Deterministic targeted edits (instant, no LLM). Untouched "
+            "content is byte-preserved — charts, images, styles, merged "
+            "cells and cached formulas all survive the edit. Addresses "
+            "come from analyze_doc: .docx -> "
             "{action: replace|insert_after|delete, para | table/row/col, "
             "new_text|markdown}; .xlsx -> {action: set_cell|append_rows|"
             "add_sheet, sheet, cell, value, rows}; .pptx -> {slide, "
@@ -156,12 +158,36 @@ def build_local_mcp_server() -> FastMCP:
         }
 
     @mcp.tool(
+        name="edit_chart",
+        description=(
+            "Deterministically edit native charts in a local .docx/.xlsx/"
+            ".pptx (instant, no LLM). Addresses come from analyze_doc's "
+            "'charts' list. Edits: {chart: i, title: '...'} to retitle; or "
+            "{chart: i, categories: [...], series: [{name, values: [...]}]} "
+            "to set data — rewrites the chart AND its embedded workbook so "
+            "Office double-click-edit matches. Byte-preserves everything else."
+        ),
+    )
+    async def edit_chart_tool(
+        doc: str,
+        edits: list[dict],
+        output: str | None = None,
+    ) -> dict[str, Any]:
+        result = simple.edit_chart(doc, edits, output=output)
+        return {
+            "path": str(result.path),
+            "applied": result.applied,
+            "results": result.results,
+        }
+
+    @mcp.tool(
         name="analyze_doc",
         description=(
             "Inspect a local document's structure and get the exact "
-            "addresses set_doc_text needs (.docx paragraph outline, .xlsx "
-            "sheets + sample rows, .pptx slides + shape ids). "
-            "Deterministic, no LLM, no key. Call before editing."
+            "addresses set_doc_text / edit_chart need (.docx paragraph "
+            "outline, .xlsx sheets + sample rows, .pptx slides + shape ids; "
+            "plus a 'charts' list for edit_chart). Deterministic, no LLM, "
+            "no key. Call before editing."
         ),
     )
     async def analyze_doc_tool(doc: str) -> dict[str, Any]:

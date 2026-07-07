@@ -101,7 +101,7 @@ class TestAgentTools:
     def test_schemas_are_anthropic_shaped(self):
         assert TOOL_NAMES == [
             "generate_doc", "edit_doc", "preview_doc", "render_doc",
-            "set_doc_text", "analyze_doc",
+            "set_doc_text", "edit_chart", "analyze_doc",
         ]
         for tool in ANTHROPIC_TOOLS:
             assert set(tool) == {"name", "description", "input_schema"}

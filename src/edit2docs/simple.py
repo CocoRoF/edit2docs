@@ -38,6 +38,8 @@ __all__ = [
     "edit_doc",
     "preview_doc",
     "set_doc_text",
+    "edit_chart",
+    "list_charts",
     "analyze_doc",
     "async_generate_doc",
     "async_edit_doc",
@@ -675,18 +677,78 @@ def analyze_doc(doc: str | Path) -> dict:
     """Structure outline with the addresses :func:`set_doc_text` needs.
 
     .pptx -> slides/shape ids (see :func:`analyze_pptx`) · .docx ->
-    paragraph/table-cell outline · .xlsx -> sheets + sample rows.
+    paragraph/table-cell outline · .xlsx -> sheets + sample rows. Every
+    format also carries a ``"charts"`` list (the addresses
+    :func:`edit_chart` takes) so a planner sees the charts it must edit
+    or avoid clobbering.
     """
+    from .documents.chart_edit import list_charts
+
     fmt = _fmt_of(doc)
+    content = _read_pptx(doc)
     if fmt == "pptx":
-        return {"format": "pptx", **analyze_pptx(doc)}
+        info = {"format": "pptx", **analyze_pptx(doc)}
+        info.setdefault("charts", list_charts(content, "pptx"))
+        return info
     if fmt == "docx":
         from .documents.docx_engine import docx_outline
 
-        return {"format": "docx", "outline": docx_outline(_read_pptx(doc))}
+        return {
+            "format": "docx",
+            "outline": docx_outline(content),
+            "charts": list_charts(content, "docx"),
+        }
     from .documents.xlsx_engine import xlsx_outline
 
-    return {"format": "xlsx", **xlsx_outline(_read_pptx(doc))}
+    return {"format": "xlsx", **xlsx_outline(content)}
+
+
+def list_charts(doc: str | Path) -> list[dict]:
+    """Read-only chart summaries — kinds, titles, series data — for any
+    of the three formats. Each entry's ``chart`` index is the address
+    :func:`edit_chart` takes."""
+    from .documents.chart_edit import list_charts as _list
+
+    return _list(_read_pptx(doc), _fmt_of(doc))
+
+
+def edit_chart(
+    doc: str | Path,
+    edits: list[dict],
+    *,
+    output: str | Path | None = None,
+) -> TextEditsResult:
+    """Deterministically edit native charts (no LLM), any format.
+
+    Each edit addresses a chart by ``{"chart": i}`` (from
+    :func:`list_charts` / :func:`analyze_doc`):
+
+    * ``{"chart": 0, "title": "Q3 Sales"}`` — retitle.
+    * ``{"chart": 0, "categories": ["Q1", "Q2"],
+      "series": [{"name": "Sales", "values": [120, 135]}]}`` — set data
+      (rewrites the chart caches AND its embedded workbook, so Office's
+      double-click-edit shows the same numbers).
+
+    Untouched package parts stay byte-identical.
+    """
+    from .documents.chart_edit import _coerce_edit, apply_chart_edits
+
+    fmt = _fmt_of(doc)
+    content = _read_pptx(doc)
+    typed = [_coerce_edit(e) for e in edits]
+    new_content, results = apply_chart_edits(content, fmt, typed)
+    dumped = [
+        {"action": r.action, "chart": r.chart, "status": r.status, "message": r.message}
+        for r in results
+    ]
+    applied = sum(1 for r in results if r.status == "applied")
+    out = Path(output) if output is not None else _default_output(doc, "_chart")
+    if applied > 0:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(new_content)
+    else:
+        out = Path(doc)
+    return TextEditsResult(path=out, applied=applied, results=dumped)
 
 
 def set_doc_text(

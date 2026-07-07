@@ -3,7 +3,7 @@
 **AI-agent-native document engine — DOCX · XLSX · PPTX. English-first, with first-class Korean support.**
 
 [![PyPI](https://img.shields.io/pypi/v/edit2docs)](https://pypi.org/project/edit2docs/)
-[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://pypi.org/project/edit2docs/)
+[![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://pypi.org/project/edit2docs/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green)](./LICENSE)
 
 [한국어 README](./README.ko.md)
@@ -45,9 +45,9 @@ for wiring both containers behind nginx.
 
 ---
 
-## The six verbs
+## The seven verbs
 
-Every surface exposes the same six **format-dispatched** verbs — the file
+Every surface exposes the same seven **format-dispatched** verbs — the file
 extension picks the engine. Deterministic verbs need no API key; generative
 ones are BYOK (`api_key=...` or `ANTHROPIC_API_KEY`).
 
@@ -57,8 +57,17 @@ ones are BYOK (`api_key=...` or `ANTHROPIC_API_KEY`).
 | `edit_doc` | one natural-language edit turn; untouched content stays **byte-identical** | ✳ |
 | `preview_doc` | .pptx → per-slide SVG · .docx/.xlsx → markdown | — |
 | `render_doc` | any format → page **PNGs / PDF / SVGs** — no LibreOffice, no subprocess | — |
-| `analyze_doc` | structure outline **with the exact addresses `set_doc_text` needs** | — |
-| `set_doc_text` | deterministic targeted edits (paragraphs / cells / slide text) | — |
+| `analyze_doc` | structure outline **with the exact addresses `set_doc_text` / `edit_chart` need** (incl. a `charts` list) | — |
+| `set_doc_text` | deterministic targeted edits — **lossless** (charts / images / styles / formulas survive) | — |
+| `edit_chart` | deterministically edit a native chart's **data or title** — rewrites the chart *and* its embedded workbook | — |
+
+**Lossless editing.** The deterministic edit verbs run on
+[contextifier](https://github.com/CocoRoF/Contextifier)'s raw OOXML layer:
+edits are surgical and untouched package parts stay byte-identical, so a
+chart, pivot table, sparkline, inline image or cached formula is never
+collateral damage of a text edit. The PPTX chat editor (`edit_doc` on a
+deck) likewise **preserves native charts and tables** on slides it
+regenerates, instead of flattening them into pictures.
 
 ---
 
@@ -125,6 +134,17 @@ set_doc_text("deck.pptx", [
     {"slide": 0, "shape_id": 2, "para": 0, "new_text": "New title"},  # pptx
 ])
 
+# Edit a native chart's data or title — the chart stays a real, editable
+# PowerPoint/Excel chart (its embedded workbook is rewritten too).
+from edit2docs import edit_chart, list_charts
+
+list_charts("deck.pptx")   # [{"chart": 0, "kind": "bar", "title": ..., "series": [...]}]
+edit_chart("deck.pptx", [
+    {"chart": 0, "title": "Q3 Sales"},
+    {"chart": 0, "categories": ["Q1", "Q2", "Q3"],
+     "series": [{"name": "Sales", "values": [120, 135, 150]}]},
+])
+
 preview_doc("deck.pptx", out_dir="previews")   # per-slide self-contained SVGs
 render_doc("report.docx", to="pdf")            # page PNGs / a PDF / raw SVGs
 render_doc("deck.pptx", to="png", dpi=200)     # resvg raster — no LibreOffice
@@ -137,7 +157,7 @@ Async variants exist for the generative verbs: `async_generate_doc`,
 
 ## 2 · Agent tools (function calling)
 
-The same six verbs as Anthropic tool-use schemas plus a dispatcher:
+The same seven verbs as Anthropic tool-use schemas plus a dispatcher:
 
 ```python
 import anthropic
@@ -308,12 +328,13 @@ uv venv .venv && uv pip install -e ".[server,dev]"
 
 | version | highlights |
 |---|---|
-| **v0.7.0** | upstream sync (ppt-master v2.7 → v3.1, 3 waves): **native chart/table export**, paragraph-merge editability, PowerPoint repair-prompt fixes, checker hardening · **English-first flip** with full Korean support |
+| **v0.8.0** | **lossless editing** on [contextifier](https://github.com/CocoRoF/Contextifier)'s raw OOXML layer — set_doc_text/edit_doc no longer destroy charts, images, sparklines, styles or cached formulas; PPTX chat-edit preserves native charts/tables; new **`edit_chart`** verb (data + title, embedded workbook synced) |
+| v0.7.0 | upstream sync (ppt-master v2.7 → v3.1, 3 waves): **native chart/table export**, paragraph-merge editability, PowerPoint repair-prompt fixes, checker hardening · **English-first flip** with full Korean support |
 | v0.5–0.6 | `render_doc` — native page rendering to PNG/PDF/SVG for all 3 formats (resvg + PyMuPDF, no LibreOffice) |
 | v0.4.0 | addressable native previews (`data-e2d-*`) — preview, outline and editor share one address space |
 | v0.3.0 | live edit streaming — per-operation SSE events with addressable targets |
 | v0.2.x | multi-format hosted API + full-format hardening |
-| v0.1.0 | multi-format engine: the six verbs across DOCX/XLSX/PPTX |
+| v0.1.0 | multi-format engine: the core verbs across DOCX/XLSX/PPTX |
 
 ## License
 

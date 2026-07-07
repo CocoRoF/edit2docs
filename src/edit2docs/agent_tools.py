@@ -155,8 +155,10 @@ ANTHROPIC_TOOLS: list[dict[str, Any]] = [
     {
         "name": "set_doc_text",
         "description": (
-            "Deterministic targeted edits (instant, no LLM, formatting "
-            "preserved). Addresses come from analyze_doc: .docx -> "
+            "Deterministic targeted edits (instant, no LLM). Untouched "
+            "content is byte-preserved — charts, images, styles, merged "
+            "cells and cached formulas all survive the edit. Addresses "
+            "come from analyze_doc: .docx -> "
             "{action: replace|insert_after|delete, para | table/row/col, "
             "new_text|markdown}; .xlsx -> {action: set_cell|append_rows|"
             "add_sheet, sheet, cell, value, rows}; .pptx -> {slide, "
@@ -181,13 +183,42 @@ ANTHROPIC_TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "edit_chart",
+        "description": (
+            "Deterministically edit native charts in any format (instant, "
+            "no LLM). Addresses come from analyze_doc's 'charts' list. "
+            "Edits: {chart: i, title: '...'} to retitle; or {chart: i, "
+            "categories: [...], series: [{name, values: [...]}]} to set the "
+            "data — this rewrites the chart AND its embedded workbook so "
+            "PowerPoint/Excel double-click-edit shows the same numbers. "
+            "Untouched package parts stay byte-identical."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "doc": _DOC_PATH,
+                "edits": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "Chart edit objects (see description).",
+                },
+                "output": {
+                    "type": "string",
+                    "description": "Output path (default: <input>_chart.<ext>).",
+                },
+            },
+            "required": ["doc", "edits"],
+        },
+    },
+    {
         "name": "analyze_doc",
         "description": (
             "Inspect a document's structure and get the exact addresses "
-            "set_doc_text needs: .docx -> paragraph/table-cell outline with "
-            "indices; .xlsx -> sheets, dimensions, sample rows; .pptx -> "
-            "slides, theme, per-paragraph shape ids. Deterministic, no LLM, "
-            "no key. Call this before editing."
+            "set_doc_text / edit_chart need: .docx -> paragraph/table-cell "
+            "outline with indices; .xlsx -> sheets, dimensions, sample rows; "
+            ".pptx -> slides, theme, per-paragraph shape ids. Every format "
+            "also returns a 'charts' list (kinds/titles/series) for "
+            "edit_chart. Deterministic, no LLM, no key. Call before editing."
         ),
         "input_schema": {
             "type": "object",
@@ -261,6 +292,15 @@ async def run_tool_async(
         return {"preview_path": str(rendered)}
     if name == "set_doc_text":
         result = simple.set_doc_text(
+            args["doc"], args["edits"], output=args.get("output")
+        )
+        return {
+            "path": str(result.path),
+            "applied": result.applied,
+            "results": result.results,
+        }
+    if name == "edit_chart":
+        result = simple.edit_chart(
             args["doc"], args["edits"], output=args.get("output")
         )
         return {
