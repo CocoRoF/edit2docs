@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 from pptx import Presentation
+from pptx.chart.data import CategoryChartData
+from pptx.enum.chart import XL_CHART_TYPE
 from pptx.util import Emu, Inches
 
 from edit2docs.llm.anthropic_client import LLMResult, LLMUsage
@@ -166,3 +168,134 @@ class TestEditDeck:
         planner_user = llm.calls[0]["user"]
         assert "파란색 계열" in planner_user
         assert "# Chat history" in planner_user
+
+
+# ---------------------------------------------------------------------------
+# Native-content protection (P0-1) through the full chat-edit turn
+# ---------------------------------------------------------------------------
+
+PLAN_EDIT_NATIVE_SLIDE = (
+    "```reply\n1번 슬라이드 제목을 바꿉니다.\n```\n"
+    "```edit_plan\n"
+    "operations:\n"
+    '  - action: edit\n    slide: 1\n    brief: "제목만 교체, 차트/표는 그대로"\n'
+    "```"
+)
+
+
+def _host_pptx_with_native(tmp_path: Path) -> bytes:
+    """Slide 1: title + 3x4 table + column chart. Slide 2: text only."""
+    prs = Presentation()
+    prs.slide_width = Emu(12192000)
+    prs.slide_height = Emu(6858000)
+
+    s1 = prs.slides.add_slide(prs.slide_layouts[6])
+    box = s1.shapes.add_textbox(Inches(1), Inches(0.3), Inches(4), Inches(1))
+    box.text_frame.text = "원본 제목"
+    tbl = s1.shapes.add_table(
+        3, 4, Inches(0.5), Inches(1.5), Inches(6), Inches(1.5)
+    ).table
+    for r in range(3):
+        for c in range(4):
+            tbl.cell(r, c).text = f"R{r}C{c}"
+    cd = CategoryChartData()
+    cd.categories = ["Q1", "Q2", "Q3"]
+    cd.add_series("Sales", (10.0, 20.0, 30.0))
+    chart = s1.shapes.add_chart(
+        XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(0.5), Inches(3.2), Inches(4), Inches(3), cd
+    ).chart
+    chart.has_title = True
+    chart.chart_title.text_frame.text = "분기별 매출"
+
+    s2 = prs.slides.add_slide(prs.slide_layouts[6])
+    b2 = s2.shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(1))
+    b2.text_frame.text = "본문"
+
+    path = tmp_path / "native.pptx"
+    prs.save(str(path))
+    return path.read_bytes()
+
+
+class TestEditDeckNativeProtection:
+    @pytest.mark.asyncio
+    async def test_editing_native_slide_preserves_chart_and_table(
+        self, monkeypatch, tmp_path
+    ):
+        llm = _RoutingLLM(plan=PLAN_EDIT_NATIVE_SLIDE)
+        import sys
+
+        ed = sys.modules["edit2docs.tools.edit_deck"]
+        monkeypatch.setattr(ed, "AnthropicClient", lambda **kw: llm)
+
+        events: list = []
+        resp = await edit_deck(
+            _request(_host_pptx_with_native(tmp_path), "1번 슬라이드 제목 바꿔줘"),
+            on_event=lambda e: events.append(e),
+        )
+
+        assert resp.changed is True
+
+        # The planner saw the native annotation in the deck outline.
+        planner_user = llm.calls[0]["user"]
+        assert "[native:" in planner_user
+        assert "분기별 매출" in planner_user
+        assert "table 3x4" in planner_user
+
+        # The regenerated slide 1 kept both native objects.
+        out = tmp_path / "check.pptx"
+        out.write_bytes(resp.pptx)
+        prs = Presentation(str(out))
+        s1 = prs.slides[0]
+        assert "채팅으로 편집된" in "".join(
+            sh.text_frame.text for sh in s1.shapes if sh.has_text_frame
+        )
+        chart_shapes = [sh for sh in s1.shapes if sh.has_chart]
+        assert len(chart_shapes) == 1
+        assert list(chart_shapes[0].chart.plots[0].categories) == ["Q1", "Q2", "Q3"]
+        assert len([sh for sh in s1.shapes if sh.has_table]) == 1
+
+        # A preservation warning was surfaced with a machine-readable detail.
+        preserved_w = [
+            w for w in resp.warnings if w.code == "native_objects_preserved"
+        ]
+        assert len(preserved_w) == 1
+        assert preserved_w[0].detail["slide"] == 1
+        assert "table" in preserved_w[0].detail["preserved"]
+
+        # The op event for the edit carried the additive "preserved" list.
+        op_events = [
+            e.message_vars["op"]
+            for e in events
+            if e.message_vars and "op" in e.message_vars
+        ]
+        edit_ops = [o for o in op_events if o.get("action") == "edit"]
+        assert edit_ops
+        assert all("chart" in o["preserved"] for o in edit_ops)
+        assert all("table" in o["preserved"] for o in edit_ops)
+
+    @pytest.mark.asyncio
+    async def test_preserve_native_opt_out_flattens(self, monkeypatch, tmp_path):
+        llm = _RoutingLLM(plan=PLAN_EDIT_NATIVE_SLIDE)
+        import sys
+
+        ed = sys.modules["edit2docs.tools.edit_deck"]
+        monkeypatch.setattr(ed, "AnthropicClient", lambda **kw: llm)
+
+        req = EditDeckRequest(
+            pptx=_host_pptx_with_native(tmp_path),
+            instruction="1번 슬라이드 제목 바꿔줘",
+            lang="ko-KR",
+            anthropic_api_key="sk-ant-stub",
+            preserve_native=False,
+        )
+        resp = await edit_deck(req)
+
+        out = tmp_path / "flat.pptx"
+        out.write_bytes(resp.pptx)
+        prs = Presentation(str(out))
+        s1 = prs.slides[0]
+        assert not any(sh.has_chart for sh in s1.shapes)
+        assert not any(sh.has_table for sh in s1.shapes)
+        assert not any(
+            w.code == "native_objects_preserved" for w in resp.warnings
+        )

@@ -24,6 +24,9 @@ clean, flat SVG — no scripts, no CSS classes, no external URLs, no
   wrapping (SVG does not wrap). Keep the slide's existing font sizes and
   family unless the brief changes them.
 - Style attributes as native attributes (`fill="#1B64DA"`), not `style="..."`.
+- If the brief says the slide has a native chart / table / SmartArt, do NOT
+  redraw it as shapes: the engine keeps the real object and re-inserts it at
+  its original position. Leave that region of the canvas empty in your SVG.
 
 ## Output format
 

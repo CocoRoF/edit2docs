@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Literal
 from xml.etree import ElementTree as ET
 
@@ -32,16 +32,16 @@ from pydantic import Field
 from ..core.svg_to_pptx.layout_repair import repair_layout
 from ..core.svg_to_pptx.pptx_edit import KeepSlide, NewSlide, recompose_pptx
 from ..core.svg_to_pptx.svg_scale import scale_svg_to_viewbox
-from ..llm import AnthropicClient, DEFAULT_MODEL, build_output_lang_directive, load_prompt
+from ..llm import DEFAULT_MODEL, AnthropicClient, build_output_lang_directive, load_prompt
 from ..llm.anthropic_client import LLMUsage
+from ._reply_texts import reply_text
 from ._workspace import temp_workspace
 from .convert import ConvertRequest, convert_to_markdown
 from .generate_deck import EventCallback, StageEvent, _emit, _merge_cost
 from .render_preview import RenderPreviewRequest, render_preview
-from ._reply_texts import reply_text
 from .types import (
-    CostBreakdown,
     DEFAULT_LANG,
+    CostBreakdown,
     LangCode,
     ToolRequest,
     ToolResponse,
@@ -72,6 +72,12 @@ class EditDeckRequest(ToolRequest):
     # cap only guards against runaway plans. Truncation is reported in the
     # chat reply so the user knows to re-run for the remainder.
     max_operations: int = Field(default=20, ge=1, le=40)
+    # A slide the LLM regenerates from SVG can only *draw* — native charts,
+    # tables and diagrams would flatten into shapes (and their chart parts
+    # orphan). With this on (default) the recompose carries those native
+    # objects into the regenerated slide instead. Opt out to accept the old
+    # flatten-everything behaviour.
+    preserve_native: bool = Field(default=True)
 
 
 class EditDeckResponse(ToolResponse):
@@ -115,6 +121,11 @@ async def edit_deck(
     slide_svgs = [s.svg for s in preview.slides]
     canvas_w, canvas_h = preview.width_px, preview.height_px
 
+    # Native-content inventory (charts / tables / diagrams) per slide. The
+    # planner needs to know which slides carry native objects so it prefers
+    # text-level edits there; the recompose will preserve them either way.
+    slide_natives = _native_inventory(req.pptx) if req.preserve_native else []
+
     # Stage 2: plan (LLM).
     await _emit(
         on_event,
@@ -123,7 +134,9 @@ async def edit_deck(
     client = AnthropicClient(api_key=req.anthropic_api_key, model=req.model)
     planner_system = build_output_lang_directive(req.lang) + "\n\n" + load_prompt("editor-planner")
     planner_user = _build_planner_message(
-        req, slide_svgs, canvas_w, canvas_h, sources_markdown=sources_markdown
+        req, slide_svgs, canvas_w, canvas_h,
+        sources_markdown=sources_markdown,
+        slide_natives=slide_natives,
     )
     result = await client.complete(
         system_prompt=planner_system,
@@ -193,6 +206,14 @@ async def edit_deck(
         id(op): op_summary("pptx", op, index=i, total=len(operations), lang=req.lang)
         for i, op in enumerate(operations)
     }
+    # Per-op honesty: an edit that regenerates a slide carrying native
+    # objects will preserve them; surface that additively in the op event
+    # detail so the studio can show "chart kept" alongside "slide edited".
+    for op in operations:
+        if op["action"] == "edit":
+            idx = op["slide"] - 1
+            if 0 <= idx < len(slide_natives) and slide_natives[idx].kinds:
+                op_summaries[id(op)]["preserved"] = list(slide_natives[idx].kinds)
     await _emit(
         on_event,
         StageEvent(
@@ -320,7 +341,9 @@ async def edit_deck(
                 path = ws / f"edit_{counter}.svg"
                 counter += 1
                 path.write_text(svg, encoding="utf-8")
-                sequence[op["slide"] - 1] = NewSlide(path)
+                # replaces=index enables native-content preservation for
+                # this regenerated slide in the recompose.
+                sequence[op["slide"] - 1] = NewSlide(path, replaces=op["slide"] - 1)
                 applied.append({"action": "edit", "slide": op["slide"]})
             else:  # add
                 if svg is None:
@@ -359,10 +382,18 @@ async def edit_deck(
         host_path.write_bytes(req.pptx)
         out_path = ws / "out.pptx"
         recompose_warnings = await asyncio.to_thread(
-            recompose_pptx, host_path, final_sequence, out_path
+            recompose_pptx,
+            host_path,
+            final_sequence,
+            out_path,
+            preserve_native=req.preserve_native,
         )
         for w in recompose_warnings:
-            warnings.append(WarningEntry(code=w["code"], message=w["message"]))
+            warnings.append(
+                WarningEntry(
+                    code=w["code"], message=w["message"], detail=w.get("detail")
+                )
+            )
         new_pptx = out_path.read_bytes()
         new_page_count = len(final_sequence)
 
@@ -379,6 +410,100 @@ async def edit_deck(
 
 
 # ---------------------------------------------------------------------------
+# Native-content inventory
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _SlideNatives:
+    """Native objects on one slide, for planner visibility + op honesty.
+
+    ``labels`` are human strings for the deck outline (e.g.
+    ``'bar chart "Sales by Quarter"'``); ``kinds`` are the deduped
+    coarse kinds (``"chart"`` / ``"table"`` / ``"diagram"``) that the
+    recompose actually preserves — used to annotate op events.
+    """
+
+    labels: list[str] = field(default_factory=list)
+    kinds: list[str] = field(default_factory=list)
+
+
+def _native_inventory(pptx: bytes) -> list[_SlideNatives]:
+    """Per-slide (0-based) inventory of native charts / tables / diagrams.
+
+    Uses contextifier's raw layer to read the deck losslessly. Chart kind
+    and title come cheaply from :class:`ChartModel`. Any failure (missing
+    dependency, malformed package) degrades to an empty inventory — the
+    planner simply loses the annotation, never the turn.
+    """
+    try:
+        from contextifier import open_raw
+    except Exception:  # pragma: no cover - contextifier is a hard dep
+        return []
+    try:
+        raw = open_raw(pptx, extension="pptx")
+    except Exception:
+        return []
+    out: list[_SlideNatives] = []
+    try:
+        for slide in raw.slides:
+            info = _SlideNatives()
+            try:
+                shapes = slide.shapes
+            except Exception:
+                out.append(info)
+                continue
+            # Charts: pair each chart graphicFrame with a ChartModel for
+            # its kind + title (order matches document order well enough
+            # for a human-readable annotation).
+            try:
+                charts = slide.charts
+            except Exception:
+                charts = []
+            chart_i = 0
+            for sh in shapes:
+                if sh.kind == "chart":
+                    label = "chart"
+                    if chart_i < len(charts):
+                        cm = charts[chart_i]
+                        chart_i += 1
+                        try:
+                            kind = cm.kind
+                            title = cm.title
+                        except Exception:
+                            kind, title = None, None
+                        label = f"{kind} chart" if kind else "chart"
+                        if title:
+                            label += f' "{title}"'
+                    info.labels.append(label)
+                    if "chart" not in info.kinds:
+                        info.kinds.append("chart")
+                elif sh.kind == "diagram":
+                    info.labels.append("diagram (SmartArt)")
+                    if "diagram" not in info.kinds:
+                        info.kinds.append("diagram")
+            # Tables: dimensions from the raw table facade.
+            try:
+                tables = slide.tables
+            except Exception:
+                tables = []
+            for tbl in tables:
+                try:
+                    info.labels.append(f"table {tbl.n_rows}x{tbl.n_cols}")
+                except Exception:
+                    info.labels.append("table")
+                if "table" not in info.kinds:
+                    info.kinds.append("table")
+            out.append(info)
+    finally:
+        try:
+            raw.close()
+        except Exception:
+            pass
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Prompt assembly
 # ---------------------------------------------------------------------------
 
@@ -390,13 +515,19 @@ def _build_planner_message(
     canvas_h: float,
     *,
     sources_markdown: list[str] | None = None,
+    slide_natives: list[_SlideNatives] | None = None,
 ) -> str:
     lines: list[str] = []
     lines.append("# Deck outline")
     lines.append(f"Canvas: {canvas_w:g} x {canvas_h:g} px · {len(slide_svgs)} slides")
+    natives = slide_natives or []
     for i, svg in enumerate(slide_svgs, start=1):
         text = _extract_slide_text(svg, limit=280)
-        lines.append(f"- Slide {i}: {text or '(no text)'}")
+        line = f"- Slide {i}: {text or '(no text)'}"
+        labels = natives[i - 1].labels if i - 1 < len(natives) else []
+        if labels:
+            line += f"  [native: {', '.join(labels)}]"
+        lines.append(line)
     lines.append("")
     if sources_markdown:
         lines.append("# Reference documents (attached to this turn)")
