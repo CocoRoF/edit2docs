@@ -48,14 +48,22 @@ GOOD_PLAN = (
 
 @dataclass
 class _SequenceLLM:
-    """Planner calls consume `planner_outputs` in order; slide calls emit SVG."""
+    """Planner calls consume `planner_outputs` in order; slide calls emit SVG.
+
+    Captures each planner call's ``user_suffix`` + ``model`` so tests can
+    assert the retry-cache shape (same user_message, reminder in the suffix).
+    """
 
     planner_outputs: list[str]
     planner_calls: list[str] = field(default_factory=list)
+    planner_suffixes: list[str] = field(default_factory=list)
+    planner_models: list[str | None] = field(default_factory=list)
 
     async def complete(self, system_prompt, user_message, **kwargs):
         if "Deck Edit Planner" in system_prompt:
             self.planner_calls.append(user_message)
+            self.planner_suffixes.append(kwargs.get("user_suffix", ""))
+            self.planner_models.append(kwargs.get("model"))
             text = self.planner_outputs[
                 min(len(self.planner_calls) - 1, len(self.planner_outputs) - 1)
             ]
@@ -100,7 +108,13 @@ class TestPlannerRetry:
         _wire(monkeypatch, llm)
         resp = await edit_deck(_request(_deck_bytes(tmp_path)))
         assert len(llm.planner_calls) == 2
-        assert "REMINDER" in llm.planner_calls[1]
+        # Retry-cache shape: the retry re-sends the SAME user_message (cache
+        # read); the reminder is now the volatile user_suffix, NOT concatenated
+        # into the user prefix (the old shape re-paid for the whole prompt).
+        assert llm.planner_calls[0] == llm.planner_calls[1]
+        assert "REMINDER" not in llm.planner_calls[1]
+        assert llm.planner_suffixes[0] == ""
+        assert "REMINDER" in llm.planner_suffixes[1]
         assert resp.changed is True
         assert resp.operations == [{"action": "edit", "slide": 1}]
 
@@ -111,6 +125,43 @@ class TestPlannerRetry:
         resp = await edit_deck(_request(_deck_bytes(tmp_path)))
         assert resp.changed is False
         assert "적용되지 않았습니다" in resp.reply  # no false promises
+
+
+class TestPlannerModelTiering:
+    """EDIT2DOCS_MODEL_PLANNER re-tiers the planner call; unset uses req.model."""
+
+    EMPTY_PLAN = "```reply\n확인했습니다.\n```\n```edit_plan\noperations: []\n```"
+
+    @pytest.fixture(autouse=True)
+    def _clean_settings(self, monkeypatch):
+        from edit2docs.config import reset_settings_cache
+
+        monkeypatch.delenv("EDIT2DOCS_MODEL_PLANNER", raising=False)
+        reset_settings_cache()
+        yield
+        monkeypatch.delenv("EDIT2DOCS_MODEL_PLANNER", raising=False)
+        reset_settings_cache()
+
+    @pytest.mark.asyncio
+    async def test_env_override_selects_planner_model(self, monkeypatch, tmp_path):
+        from edit2docs.config import reset_settings_cache
+
+        monkeypatch.setenv("EDIT2DOCS_MODEL_PLANNER", "claude-sonnet-5")
+        reset_settings_cache()
+        llm = _SequenceLLM(planner_outputs=[self.EMPTY_PLAN])
+        _wire(monkeypatch, llm)
+        await edit_deck(_request(_deck_bytes(tmp_path)))
+        assert llm.planner_models[0] == "claude-sonnet-5"
+
+    @pytest.mark.asyncio
+    async def test_unset_uses_request_model(self, monkeypatch, tmp_path):
+        llm = _SequenceLLM(planner_outputs=[self.EMPTY_PLAN])
+        _wire(monkeypatch, llm)
+        # _request builds an EditDeckRequest whose model defaults to DEFAULT_MODEL.
+        await edit_deck(_request(_deck_bytes(tmp_path)))
+        from edit2docs.llm import DEFAULT_MODEL
+
+        assert llm.planner_models[0] == DEFAULT_MODEL
 
 
 class TestOperationCap:

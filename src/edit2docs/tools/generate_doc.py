@@ -14,14 +14,15 @@ from typing import Literal
 import yaml
 from pydantic import Field
 
+from ..config import resolve_model
 from ..documents.docx_engine import docx_from_markdown
 from ..documents.xlsx_engine import xlsx_from_spec
-from ..llm import AnthropicClient, DEFAULT_MODEL, build_output_lang_directive, load_prompt
+from ..llm import DEFAULT_MODEL, AnthropicClient, build_output_lang_directive, load_prompt
 from .edit_deck import _cost_from_usage, _extract_block
 from .generate_deck import _merge_cost
 from .types import (
-    CostBreakdown,
     DEFAULT_LANG,
+    CostBreakdown,
     LangCode,
     ToolRequest,
     ToolResponse,
@@ -64,6 +65,9 @@ async def generate_document(req: GenerateDocRequest) -> GenerateDocResponse:
 
     role, label = _ROLES[req.fmt]
     client = AnthropicClient(api_key=req.anthropic_api_key, model=req.model)
+    # Writer-tier model (env EDIT2DOCS_MODEL_WRITER), falling back to the
+    # request's BYOK model when no override is set.
+    writer_model = resolve_model("writer", req.model)
     system = build_output_lang_directive(req.lang) + "\n\n" + load_prompt(role)
     user = _build_user_message(req)
 
@@ -82,7 +86,7 @@ async def generate_document(req: GenerateDocRequest) -> GenerateDocResponse:
             user_message=message,
             max_output_tokens=16384,
             cache_system=True,
-            model=req.model,
+            model=writer_model,
         )
         cost = _merge_cost(cost, _cost_from_usage(result.usage))
         block = _extract_block(result.text, label)
