@@ -3,7 +3,7 @@ name = "edit2docs"
 version = "0.7.1"
 description = "AI-agent-native document engine: generate and chat-edit DOCX, XLSX and PPTX as a Python library, agent tool set, MCP server or hosted service. English-first with first-class Korean support. Sister project of edit2ppt."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = {text = "Apache-2.0"}
 authors = [{name = "edit2docs contributors"}]
 keywords = [
@@ -15,8 +15,8 @@ keywords = [
 classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Operating System :: OS Independent",
 ]
 
@@ -122,7 +122,7 @@ packages = ["src/edit2docs"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 src = ["src", "tests"]
 extend-exclude = [
     "src/edit2docs/core",  # ppt-master fork; lint separately if/when we rewrite
@@ -169,5 +169,5 @@ exclude = [
     "**/__pycache__",
     ".venv",
 ]
-pythonVersion = "3.11"
+pythonVersion = "3.12"
 typeCheckingMode = "basic"
