@@ -476,8 +476,10 @@ def render_doc(
             render end-to-end (per-format native page engines; no
             LibreOffice, no subprocess).
         to: ``"png"`` (page-1.png … page-N.png, pdftoppm-compatible
-            naming), ``"pdf"`` (single ``<stem>.pdf``), or ``"svg"``
-            (page-1.svg … — the raw vector pages).
+            naming), ``"pdf"`` (single ``<stem>.pdf``), ``"svg"``
+            (page-1.svg … — the raw vector pages), or ``"md"`` (readable
+            content: ``preview.md`` for docx/xlsx, per-slide SVGs for pptx
+            — the :func:`preview_doc` surface folded into one verb).
         out_dir: Output directory (default ``<doc dir>/render``).
         dpi: Raster resolution for png/pdf (SVG px are 96/inch).
 
@@ -486,11 +488,16 @@ def render_doc(
     """
     fmt = _fmt_of(doc)
     to = (to or "png").strip().lower()
-    if to not in ("png", "pdf", "svg"):
-        raise ValueError(f"Unsupported render target: {to!r} (use png / pdf / svg)")
+    if to not in ("png", "pdf", "svg", "md"):
+        raise ValueError(f"Unsupported render target: {to!r} (use png / pdf / svg / md)")
     src = Path(doc)
     out = Path(out_dir) if out_dir is not None else src.parent / "render"
     out.mkdir(parents=True, exist_ok=True)
+
+    if to == "md":
+        rendered = preview_doc(src, out_dir=out)
+        paths = list(rendered) if isinstance(rendered, list) else [Path(rendered)]
+        return RenderResult(paths=paths, page_count=len(paths), format=fmt, to=to)
 
     if fmt == "docx":
         from .documents.docx_pages import docx_to_page_svgs
@@ -837,14 +844,22 @@ def set_doc_xml(
     edits: list[dict] | None = None,
     *,
     xml: str | None = None,
+    content_type: str | None = None,
+    delete: bool = False,
     output: str | Path | None = None,
 ) -> TextEditsResult:
-    """Patch one XML part with exact find/replace edits (or replace it whole).
-    Deterministic, no LLM — the universal escape hatch for edits the
-    structured verbs don't cover.
+    """Patch, create or delete one XML part. Deterministic, no LLM — the
+    universal escape hatch for edits the structured verbs don't cover.
 
-    Each edit is ``{"find": str, "replace": str, "count": int (0=all)}``;
-    substrings must match the part text from :func:`get_doc_xml` exactly.
+    * ``edits`` — ``{"find", "replace", "count" (0=all)}`` against the text
+      from :func:`get_doc_xml`; substrings must match exactly.
+    * ``xml`` — whole-part replacement; a missing part is CREATED (pass
+      ``content_type`` to register its ``[Content_Types].xml`` Override —
+      needed for new slides/charts). This is how you add a slide: create
+      ``ppt/slides/slideN.xml`` + its ``.rels``, then patch
+      ``presentation.xml`` / its rels.
+    * ``delete=True`` — remove the part (also patch referencing rels).
+
     The result must stay well-formed XML or nothing is written. Untouched
     parts stay byte-identical.
     """
@@ -853,7 +868,9 @@ def set_doc_xml(
     _fmt_of(doc)
     content = _read_pptx(doc)
     typed = [coerce_edit(e) for e in edits] if edits is not None else None
-    new_content, results = apply_xml_edits(content, part, typed, xml=xml)
+    new_content, results = apply_xml_edits(
+        content, part, typed, xml=xml, content_type=content_type, delete=delete
+    )
     dumped = [
         {
             "find": r.find[:120],

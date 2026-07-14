@@ -226,15 +226,18 @@ class TestUnifiedFacade:
         from edit2docs.agent_tools import TOOL_NAMES, run_tool
 
         assert TOOL_NAMES == [
-            "generate_doc", "edit_doc", "preview_doc", "render_doc",
-            "set_doc_text", "edit_chart", "analyze_doc",
+            "generate_doc", "build_doc", "edit_doc", "render_doc",
+            "set_doc_text", "read_doc_xml", "set_doc_xml", "analyze_doc",
         ]
         docx_path = tmp_path / "r.docx"
         docx_path.write_bytes(docx_from_markdown(DOC_MD))
         info = run_tool("analyze_doc", {"doc": str(docx_path)})
         assert info["format"] == "docx"
-        res = run_tool("preview_doc", {"doc": str(docx_path), "out_dir": str(tmp_path / "p")})
-        assert res["preview_path"].endswith("preview.md")
+        res = run_tool(
+            "render_doc",
+            {"doc": str(docx_path), "to": "md", "out_dir": str(tmp_path / "p")},
+        )
+        assert res["to"] == "md" and res["paths"][0].endswith("preview.md")
 
 
 class TestEditStreaming:

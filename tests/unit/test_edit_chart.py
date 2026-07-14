@@ -225,14 +225,16 @@ class TestPublicVerb:
 
 
 class TestAgentToolSurface:
-    def test_edit_chart_in_tool_names_and_dispatch(self, tmp_path):
+    def test_chart_edits_dispatch_through_set_doc_text(self, tmp_path):
+        """Chart edits ride the unified set_doc_text tool (a `chart` key
+        routes the edit to the chart engine)."""
         from edit2docs.agent_tools import TOOL_NAMES, run_tool
 
-        assert "edit_chart" in TOOL_NAMES
+        assert "edit_chart" not in TOOL_NAMES  # consolidated away
         p = tmp_path / "d.pptx"
         p.write_bytes(_pptx_with_chart())
         out = run_tool(
-            "edit_chart",
+            "set_doc_text",
             {"doc": str(p), "edits": [{"chart": 0, "title": "Via Tool"}],
              "output": str(tmp_path / "o.pptx")},
         )

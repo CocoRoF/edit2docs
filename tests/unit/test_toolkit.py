@@ -100,9 +100,8 @@ class TestFacadeDeterministicVerbs:
 class TestAgentTools:
     def test_schemas_are_anthropic_shaped(self):
         assert TOOL_NAMES == [
-            "generate_doc", "build_doc", "edit_doc", "preview_doc",
-            "render_doc", "set_doc_text", "edit_chart", "read_doc_xml",
-            "set_doc_xml", "analyze_doc",
+            "generate_doc", "build_doc", "edit_doc", "render_doc",
+            "set_doc_text", "read_doc_xml", "set_doc_xml", "analyze_doc",
         ]
         for tool in ANTHROPIC_TOOLS:
             assert set(tool) == {"name", "description", "input_schema"}
@@ -114,9 +113,10 @@ class TestAgentTools:
         info = run_tool("analyze_doc", {"doc": str(deck_path)})
         assert info["page_count"] == 1 and info["format"] == "pptx"
         res = run_tool(
-            "preview_doc", {"doc": str(deck_path), "out_dir": str(tmp_path / "s")}
+            "render_doc",
+            {"doc": str(deck_path), "to": "md", "out_dir": str(tmp_path / "s")},
         )
-        assert res["page_count"] == 1 and Path(res["svg_paths"][0]).exists()
+        assert res["page_count"] == 1 and Path(res["paths"][0]).exists()
 
     def test_unknown_tool_raises(self):
         with pytest.raises(ValueError, match="unknown edit2docs tool"):
@@ -270,6 +270,76 @@ class TestDocXml:
             run_tool(
                 "read_doc_xml", {"doc": str(chart_deck), "part": "chart1.xml"}
             )
+
+    def test_add_slide_via_pure_xml_tool_calls(self, tmp_path):
+        """The power proof: ADD A SLIDE with nothing but read/set_doc_xml —
+        create slideN.xml + its rels, register the content type, patch
+        presentation.xml + its rels. python-pptx must see 2 slides."""
+        prs = Presentation()
+        s = prs.slides.add_slide(prs.slide_layouts[5])
+        s.shapes.title.text = "First"
+        doc = tmp_path / "deck.pptx"
+        prs.save(str(doc))
+        d = {"doc": str(doc)}
+
+        # 1) copy slide1's xml + rels as the template for slide2
+        slide_xml = run_tool(
+            "read_doc_xml", {**d, "part": "ppt/slides/slide1.xml"}
+        )["xml"].replace("First", "Second")
+        rels_xml = run_tool(
+            "read_doc_xml", {**d, "part": "ppt/slides/_rels/slide1.xml.rels"}
+        )["xml"]
+        # 2) create the new parts (content type registered for the slide)
+        r = run_tool("set_doc_xml", {
+            **d, "part": "ppt/slides/slide2.xml", "xml": slide_xml,
+            "content_type": (
+                "application/vnd.openxmlformats-officedocument"
+                ".presentationml.slide+xml"
+            ),
+            "output": str(doc),
+        })
+        assert r["applied"] == 1, r
+        r = run_tool("set_doc_xml", {
+            **d, "part": "ppt/slides/_rels/slide2.xml.rels", "xml": rels_xml,
+            "output": str(doc),
+        })
+        assert r["applied"] == 1, r
+        # 3) wire it into the presentation: rels + sldIdLst
+        new_rel = (
+            '<Relationship Id="rIdNew" Type="http://schemas.openxmlformats.org/'
+            'officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/>'
+            "</Relationships>"
+        )
+        r = run_tool("set_doc_xml", {
+            **d, "part": "ppt/_rels/presentation.xml.rels",
+            "edits": [{"find": "</Relationships>", "replace": new_rel}],
+            "output": str(doc),
+        })
+        assert r["applied"] == 1, r
+        r = run_tool("set_doc_xml", {
+            **d, "part": "ppt/presentation.xml",
+            "edits": [{
+                "find": "</p:sldIdLst>",
+                "replace": '<p:sldId id="9999" r:id="rIdNew"/></p:sldIdLst>',
+            }],
+            "output": str(doc),
+        })
+        assert r["applied"] == 1, r
+        # 4) acceptance: python-pptx opens it and sees both slides
+        check = Presentation(str(doc))
+        assert len(check.slides) == 2
+        titles = [sl.shapes.title.text for sl in check.slides]
+        assert titles == ["First", "Second"]
+
+    def test_delete_part_roundtrip(self, chart_deck, tmp_path):
+        out = tmp_path / "nochart.pptx"
+        r = run_tool("set_doc_xml", {
+            "doc": str(chart_deck), "part": "ppt/charts/chart1.xml",
+            "delete": True, "output": str(out),
+        })
+        assert r["applied"] == 1
+        names = [p["part"] for p in run_tool("read_doc_xml", {"doc": str(out)})["parts"]]
+        assert not any("charts/chart1.xml" in n for n in names)
 
 
 class TestLocalMcpServer:

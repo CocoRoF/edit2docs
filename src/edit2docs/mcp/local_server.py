@@ -95,25 +95,12 @@ def build_local_mcp_server() -> FastMCP:
         }
 
     @mcp.tool(
-        name="preview_doc",
-        description=(
-            "Render a local document for inspection: .pptx -> slide_NNN.svg "
-            "per slide; .docx/.xlsx -> preview.md (markdown). "
-            "Deterministic, no LLM, no key."
-        ),
-    )
-    async def preview_doc_tool(doc: str, out_dir: str) -> dict[str, Any]:
-        rendered = simple.preview_doc(doc, out_dir=out_dir)
-        if isinstance(rendered, list):
-            return {"svg_paths": [str(p) for p in rendered], "page_count": len(rendered)}
-        return {"preview_path": str(rendered)}
-
-    @mcp.tool(
         name="render_doc",
         description=(
-            "Render a .pptx/.docx/.xlsx to page images or a PDF via the "
-            "LibreOffice-free native pipeline. to='png' -> page-1.png..N, "
-            "to='pdf' -> <stem>.pdf, to='svg' -> vector pages. "
+            "Render/inspect a .pptx/.docx/.xlsx via the LibreOffice-free "
+            "native pipeline. to='png' -> page-1.png..N, to='pdf' -> "
+            "<stem>.pdf, to='svg' -> vector pages, to='md' -> readable "
+            "content (preview.md for docx/xlsx, per-slide SVGs for pptx). "
             "Deterministic, no LLM, no key."
         ),
     )
@@ -134,15 +121,16 @@ def build_local_mcp_server() -> FastMCP:
     @mcp.tool(
         name="set_doc_text",
         description=(
-            "Deterministic targeted edits (instant, no LLM). Untouched "
-            "content is byte-preserved — charts, images, styles, merged "
-            "cells and cached formulas all survive the edit. Addresses "
-            "come from analyze_doc: .docx -> "
+            "Deterministic structured edits — text AND charts in one call "
+            "(instant, no LLM). Untouched content is byte-preserved. "
+            "Addresses come from analyze_doc: .docx -> "
             "{action: replace|insert_after|delete, para | table/row/col, "
             "new_text|markdown}; .xlsx -> {action: set_cell|append_rows|"
             "add_sheet, sheet, cell, value, rows}; .pptx -> {slide, "
-            "shape_id, para, new_text, row/col}. Prefer over edit_doc for "
-            "plain value/text swaps."
+            "shape_id, para, new_text, row/col}. CHART edits carry a "
+            "`chart` index from analyze_doc's 'charts' list: {chart: i, "
+            "title} retitles, {chart: i, categories, series} sets data AND "
+            "the embedded workbook. Prefer over edit_doc for value swaps."
         ),
     )
     async def set_doc_text_tool(
@@ -150,43 +138,19 @@ def build_local_mcp_server() -> FastMCP:
         edits: list[dict],
         output: str | None = None,
     ) -> dict[str, Any]:
-        result = simple.set_doc_text(doc, edits, output=output)
-        return {
-            "path": str(result.path),
-            "applied": result.applied,
-            "results": result.results,
-        }
+        from ..agent_tools import run_tool_async
 
-    @mcp.tool(
-        name="edit_chart",
-        description=(
-            "Deterministically edit native charts in a local .docx/.xlsx/"
-            ".pptx (instant, no LLM). Addresses come from analyze_doc's "
-            "'charts' list. Edits: {chart: i, title: '...'} to retitle; or "
-            "{chart: i, categories: [...], series: [{name, values: [...]}]} "
-            "to set data — rewrites the chart AND its embedded workbook so "
-            "Office double-click-edit matches. Byte-preserves everything else."
-        ),
-    )
-    async def edit_chart_tool(
-        doc: str,
-        edits: list[dict],
-        output: str | None = None,
-    ) -> dict[str, Any]:
-        result = simple.edit_chart(doc, edits, output=output)
-        return {
-            "path": str(result.path),
-            "applied": result.applied,
-            "results": result.results,
-        }
+        return await run_tool_async(
+            "set_doc_text", {"doc": doc, "edits": edits, "output": output}
+        )
 
     @mcp.tool(
         name="analyze_doc",
         description=(
             "Inspect a local document's structure and get the exact "
-            "addresses set_doc_text / edit_chart need (.docx paragraph "
+            "addresses set_doc_text needs (.docx paragraph "
             "outline, .xlsx sheets + sample rows, .pptx slides + shape ids; "
-            "plus a 'charts' list for edit_chart). Deterministic, no LLM, "
+            "plus a 'charts' list for chart edits). Deterministic, no LLM, "
             "no key. Call before editing."
         ),
     )
@@ -239,13 +203,14 @@ def build_local_mcp_server() -> FastMCP:
     @mcp.tool(
         name="set_doc_xml",
         description=(
-            "Patch one XML part with exact find/replace edits, or replace "
-            "it whole via `xml` (deterministic, no LLM, no key). The "
-            "universal escape hatch for edits the structured verbs don't "
-            "cover — recolor bars/shapes, fonts, fills, geometry. `find` "
-            "must match read_doc_xml's text EXACTLY (count 0 = all). The "
-            "result must stay well-formed XML or nothing is written; "
-            "untouched parts stay byte-identical."
+            "Patch, CREATE or DELETE one XML part (deterministic, no LLM, "
+            "no key). The universal escape hatch — recolor bars/shapes, "
+            "fonts, fills, geometry, add/remove slides. `edits` patches an "
+            "existing part (find must match read_doc_xml EXACTLY, count 0 "
+            "= all); `xml` replaces the whole part and CREATES it if "
+            "missing (pass content_type for the new part's Override); "
+            "`delete=true` removes it. Well-formed XML or nothing is "
+            "written; untouched parts stay byte-identical."
         ),
     )
     async def set_doc_xml_tool(
@@ -253,9 +218,14 @@ def build_local_mcp_server() -> FastMCP:
         part: str,
         edits: list[dict] | None = None,
         xml: str | None = None,
+        content_type: str | None = None,
+        delete: bool = False,
         output: str | None = None,
     ) -> dict[str, Any]:
-        result = simple.set_doc_xml(doc, part, edits, xml=xml, output=output)
+        result = simple.set_doc_xml(
+            doc, part, edits,
+            xml=xml, content_type=content_type, delete=delete, output=output,
+        )
         return {
             "path": str(result.path),
             "applied": result.applied,

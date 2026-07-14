@@ -142,32 +142,13 @@ ANTHROPIC_TOOLS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "preview_doc",
-        "description": (
-            "Render a document for inspection: .pptx -> one self-contained "
-            "SVG file per slide; .docx/.xlsx -> a markdown rendering "
-            "(preview.md). Deterministic, no LLM, no key."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "doc": _DOC_PATH,
-                "out_dir": {
-                    "type": "string",
-                    "description": "Directory for the preview file(s).",
-                },
-            },
-            "required": ["doc", "out_dir"],
-        },
-    },
-    {
         "name": "render_doc",
         "description": (
-            "Render a .pptx/.docx/.xlsx to page images or a PDF — the "
-            "LibreOffice-free native pipeline (per-page SVG -> resvg PNG "
-            "-> PDF). to='png' writes page-1.png..N, to='pdf' one "
-            "<stem>.pdf, to='svg' the vector pages. Deterministic, no "
-            "LLM, no key."
+            "Render/inspect a .pptx/.docx/.xlsx — LibreOffice-free native "
+            "pipeline. to='png' writes page-1.png..N, to='pdf' one "
+            "<stem>.pdf, to='svg' the vector pages, to='md' readable "
+            "content (preview.md for docx/xlsx, per-slide SVGs for pptx). "
+            "Deterministic, no LLM, no key."
         ),
         "input_schema": {
             "type": "object",
@@ -175,7 +156,7 @@ ANTHROPIC_TOOLS: list[dict[str, Any]] = [
                 "doc": _DOC_PATH,
                 "to": {
                     "type": "string",
-                    "enum": ["png", "pdf", "svg"],
+                    "enum": ["png", "pdf", "svg", "md"],
                     "description": "Output kind (default png).",
                 },
                 "out_dir": {
@@ -193,15 +174,18 @@ ANTHROPIC_TOOLS: list[dict[str, Any]] = [
     {
         "name": "set_doc_text",
         "description": (
-            "Deterministic targeted edits (instant, no LLM). Untouched "
-            "content is byte-preserved — charts, images, styles, merged "
-            "cells and cached formulas all survive the edit. Addresses "
-            "come from analyze_doc: .docx -> "
+            "Deterministic structured edits — text AND charts in one call "
+            "(instant, no LLM). Untouched content is byte-preserved. "
+            "Addresses come from analyze_doc: .docx -> "
             "{action: replace|insert_after|delete, para | table/row/col, "
             "new_text|markdown}; .xlsx -> {action: set_cell|append_rows|"
             "add_sheet, sheet, cell, value, rows}; .pptx -> {slide, "
-            "shape_id, para, new_text, row/col for tables}. Prefer this "
-            "over edit_doc for plain value/text swaps."
+            "shape_id, para, new_text, row/col for tables}. CHART edits "
+            "(any format) carry a `chart` index from analyze_doc's "
+            "'charts' list: {chart: i, title: '...'} retitles; {chart: i, "
+            "categories: [...], series: [{name, values: [...]}]} sets the "
+            "data AND the embedded workbook (Office double-click-edit "
+            "matches). Prefer this over edit_doc for value/text/data swaps."
         ),
         "input_schema": {
             "type": "object",
@@ -210,39 +194,14 @@ ANTHROPIC_TOOLS: list[dict[str, Any]] = [
                 "edits": {
                     "type": "array",
                     "items": {"type": "object"},
-                    "description": "Format-specific edit objects (see tool description).",
+                    "description": (
+                        "Edit objects; ones with a `chart` key address "
+                        "charts, the rest are format-specific text edits."
+                    ),
                 },
                 "output": {
                     "type": "string",
                     "description": "Output path (default: <input>_edited.<ext>).",
-                },
-            },
-            "required": ["doc", "edits"],
-        },
-    },
-    {
-        "name": "edit_chart",
-        "description": (
-            "Deterministically edit native charts in any format (instant, "
-            "no LLM). Addresses come from analyze_doc's 'charts' list. "
-            "Edits: {chart: i, title: '...'} to retitle; or {chart: i, "
-            "categories: [...], series: [{name, values: [...]}]} to set the "
-            "data — this rewrites the chart AND its embedded workbook so "
-            "PowerPoint/Excel double-click-edit shows the same numbers. "
-            "Untouched package parts stay byte-identical."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "doc": _DOC_PATH,
-                "edits": {
-                    "type": "array",
-                    "items": {"type": "object"},
-                    "description": "Chart edit objects (see description).",
-                },
-                "output": {
-                    "type": "string",
-                    "description": "Output path (default: <input>_chart.<ext>).",
                 },
             },
             "required": ["doc", "edits"],
@@ -275,14 +234,17 @@ ANTHROPIC_TOOLS: list[dict[str, Any]] = [
     {
         "name": "set_doc_xml",
         "description": (
-            "Patch one XML part with exact find/replace edits (or replace "
-            "the whole part via `xml`). Deterministic, no LLM, no key — the "
-            "universal escape hatch for edits the structured verbs don't "
-            "cover: recolor chart bars/shapes, fonts, fills, geometry, "
-            "anything. `find` must match the part text from read_doc_xml "
-            "EXACTLY (count 0 = replace all). The result must stay "
-            "well-formed XML or nothing is written; untouched parts stay "
-            "byte-identical."
+            "Patch, CREATE or DELETE one XML part. Deterministic, no LLM, "
+            "no key — the universal escape hatch for everything the "
+            "structured verbs don't cover: recolor bars/shapes, fonts, "
+            "fills, geometry, add/remove slides. `edits` patches an "
+            "existing part (`find` must match read_doc_xml's text EXACTLY, "
+            "count 0 = all). `xml` replaces the whole part — and CREATES "
+            "it if missing (pass `content_type` to register the new part, "
+            "e.g. adding slideN.xml + its _rels/*.rels, then patching "
+            "presentation.xml + its rels = a new slide). `delete: true` "
+            "removes the part. The result must stay well-formed XML or "
+            "nothing is written; untouched parts stay byte-identical."
         ),
         "input_schema": {
             "type": "object",
@@ -290,7 +252,7 @@ ANTHROPIC_TOOLS: list[dict[str, Any]] = [
                 "doc": _DOC_PATH,
                 "part": {
                     "type": "string",
-                    "description": "Part to patch, e.g. ppt/charts/chart1.xml.",
+                    "description": "Part to patch/create/delete, e.g. ppt/charts/chart1.xml.",
                 },
                 "edits": {
                     "type": "array",
@@ -303,11 +265,23 @@ ANTHROPIC_TOOLS: list[dict[str, Any]] = [
                         },
                         "required": ["find", "replace"],
                     },
-                    "description": "Exact-substring edits (use OR `xml`).",
+                    "description": "Exact-substring edits (one mode: edits | xml | delete).",
                 },
                 "xml": {
                     "type": "string",
-                    "description": "Full replacement XML for the part (use OR `edits`).",
+                    "description": "Full part XML — replaces, or creates a missing part.",
+                },
+                "content_type": {
+                    "type": "string",
+                    "description": (
+                        "[Content_Types].xml Override for a NEWLY created part, "
+                        "e.g. application/vnd.openxmlformats-officedocument."
+                        "presentationml.slide+xml"
+                    ),
+                },
+                "delete": {
+                    "type": "boolean",
+                    "description": "Remove the part (also patch referencing rels).",
                 },
                 "output": {
                     "type": "string",
@@ -321,11 +295,11 @@ ANTHROPIC_TOOLS: list[dict[str, Any]] = [
         "name": "analyze_doc",
         "description": (
             "Inspect a document's structure and get the exact addresses "
-            "set_doc_text / edit_chart need: .docx -> paragraph/table-cell "
-            "outline with indices; .xlsx -> sheets, dimensions, sample rows; "
+            "set_doc_text needs: .docx -> paragraph/table-cell outline "
+            "with indices; .xlsx -> sheets, dimensions, sample rows; "
             ".pptx -> slides, theme, per-paragraph shape ids. Every format "
-            "also returns a 'charts' list (kinds/titles/series) for "
-            "edit_chart. Deterministic, no LLM, no key. Call before editing."
+            "also returns a 'charts' list (kinds/titles/series) for chart "
+            "edits. Deterministic, no LLM, no key. Call before editing."
         ),
         "input_schema": {
             "type": "object",
@@ -392,29 +366,28 @@ async def run_tool_async(
             "to": result.to,
         }
 
-    if name == "preview_doc":
-        rendered = simple.preview_doc(args["doc"], out_dir=args["out_dir"])
-        if isinstance(rendered, list):
-            return {"svg_paths": [str(p) for p in rendered], "page_count": len(rendered)}
-        return {"preview_path": str(rendered)}
     if name == "set_doc_text":
-        result = simple.set_doc_text(
-            args["doc"], args["edits"], output=args.get("output")
-        )
-        return {
-            "path": str(result.path),
-            "applied": result.applied,
-            "results": result.results,
-        }
-    if name == "edit_chart":
-        result = simple.edit_chart(
-            args["doc"], args["edits"], output=args.get("output")
-        )
-        return {
-            "path": str(result.path),
-            "applied": result.applied,
-            "results": result.results,
-        }
+        # One structured-edit surface: dicts with a `chart` key go to the
+        # chart engine, the rest to the text engine, chained on one output.
+        all_edits = list(args["edits"])
+        text_edits = [e for e in all_edits if "chart" not in e]
+        chart_edits = [e for e in all_edits if "chart" in e]
+        output = args.get("output")
+        path, applied, results = args["doc"], 0, []
+        if text_edits:
+            r = simple.set_doc_text(path, text_edits, output=output)
+            path, applied = str(r.path), applied + r.applied
+            results.extend(r.results)
+        if chart_edits:
+            # Continue on the text-edit output when chaining; otherwise let
+            # edit_chart use its own default (<input>_chart.<ext>).
+            chart_out = output if output is not None else (
+                path if path != str(args["doc"]) else None
+            )
+            r = simple.edit_chart(path, chart_edits, output=chart_out)
+            path, applied = str(r.path), applied + r.applied
+            results.extend(r.results)
+        return {"path": path, "applied": applied, "results": results}
     if name == "analyze_doc":
         return simple.analyze_doc(args["doc"])
     if name == "read_doc_xml":
@@ -428,6 +401,8 @@ async def run_tool_async(
             args["part"],
             args.get("edits"),
             xml=args.get("xml"),
+            content_type=args.get("content_type"),
+            delete=bool(args.get("delete")),
             output=args.get("output"),
         )
         return {

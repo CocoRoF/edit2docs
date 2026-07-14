@@ -119,22 +119,46 @@ def apply_xml_edits(
     edits: list[XmlEdit] | None = None,
     *,
     xml: str | None = None,
+    content_type: str | None = None,
+    delete: bool = False,
 ) -> tuple[bytes, list[XmlEditResult]]:
-    """Patch one XML part; returns ``(new_bytes, results)``.
+    """Patch, create or delete one XML part; returns ``(new_bytes, results)``.
 
-    Exactly one of *edits* (find/replace list) or *xml* (whole-part
-    replacement) must be given. The final text must parse as XML or NOTHING
-    is written (the package is returned unchanged with an ``invalid``
-    result). Untouched parts stay byte-identical (raw-layer contract).
+    Modes (exactly one):
+
+    * *edits* — find/replace list against an EXISTING part's text.
+    * *xml*   — whole-part replacement; if the part does not exist it is
+      **created** (pass *content_type* to register its ``[Content_Types].xml``
+      Override — required for new slides/charts so Office accepts the file).
+    * *delete=True* — remove the part (remember to also patch the
+      referencing ``.rels`` / ``[Content_Types].xml``, which are themselves
+      XML parts).
+
+    The final text must parse as XML or NOTHING is written (the package is
+    returned unchanged with an ``invalid`` result). Untouched parts stay
+    byte-identical (raw-layer contract).
     """
-    if (edits is None) == (xml is None):
-        raise ValueError("pass exactly one of `edits` or `xml`")
+    modes = sum(1 for m in (edits is not None, xml is not None, delete) if m)
+    if modes != 1:
+        raise ValueError("pass exactly one of `edits`, `xml` or `delete=True`")
 
     pkg = _open_package(content)
-    if not pkg.has_part(part):
-        raise ValueError(f"no such part: {part!r} (use list_doc_parts)")
     if not _is_xml_name(part):
         raise ValueError(f"part {part!r} is not XML (binary parts are not editable)")
+
+    if delete:
+        if not pkg.has_part(part):
+            raise ValueError(f"no such part: {part!r} (use list_doc_parts)")
+        pkg.remove_part(part)
+        return pkg.to_bytes(), [
+            XmlEditResult(find="<delete>", status="applied", occurrences=1)
+        ]
+
+    if edits is not None and not pkg.has_part(part):
+        raise ValueError(
+            f"no such part: {part!r} (use list_doc_parts; to CREATE a new "
+            "part pass `xml` instead of `edits`)"
+        )
 
     results: list[XmlEditResult] = []
 
@@ -142,9 +166,18 @@ def apply_xml_edits(
         err = _validate_xml(xml, part)
         if err:
             return content, [XmlEditResult(find="<xml>", status="invalid", message=err)]
-        pkg.get_part(part).write(xml.encode("utf-8"))
+        created = not pkg.has_part(part)
+        if created:
+            pkg.add_part(part, xml.encode("utf-8"))
+        else:
+            pkg.get_part(part).write(xml.encode("utf-8"))
+        if content_type:
+            pkg.set_content_type_override(part, content_type)
         return pkg.to_bytes(), [
-            XmlEditResult(find="<xml>", status="applied", occurrences=1)
+            XmlEditResult(
+                find="<xml>", status="applied", occurrences=1,
+                message="created" if created else "",
+            )
         ]
 
     text = pkg.get_part(part).read().decode("utf-8")
