@@ -1,16 +1,25 @@
-"""edit2docs as a function-calling tool set for LLM agents.
+"""edit2docs as a hierarchical, progressively-disclosed tool set for LLM agents.
 
-``ANTHROPIC_TOOLS`` is a ready-to-send ``tools=[...]`` list for the
-Anthropic Messages API; ``run_tool`` / ``run_tool_async`` dispatch a tool
-call to the library facade (:mod:`edit2docs.simple`) and return a
-JSON-safe dict for the tool_result block.
+Organized like a Claude Skill:
 
-Five format-dispatched verbs cover DOCX, XLSX and PPTX — the file
-extension picks the engine, so agents don't juggle per-format tools.
+* **frontmatter** — the tool list below: nine tools, each with an
+  ultra-compact one/two-line description. This is all that sits in the
+  model's context up front.
+* **body** — ``doc_guide()`` (no topic): the family map. The hierarchy splits
+  **GENERATE vs EDIT** first, then by mechanism.
+* **resources** — ``doc_guide(topic)``: deep per-task guides
+  (``build``, ``generate``, ``edit``, ``edit.text``, ``edit.chart``,
+  ``edit.xml``, ``render``, ``recipes.slides``, ``recipes.colors``) loaded
+  only when the agent walks that branch.
 
-All tools operate on local file paths. ``generate_doc`` / ``edit_doc``
-need an Anthropic key (``api_key=`` on the dispatcher or
-``ANTHROPIC_API_KEY``); the rest are deterministic and keyless.
+``ANTHROPIC_TOOLS`` is a ready-to-send ``tools=[...]`` list for the Anthropic
+Messages API; ``OPENAI_TOOLS`` is the same set in OpenAI function-calling
+format; ``tool_specs(fmt)`` returns either. ``run_tool`` / ``run_tool_async``
+dispatch a call to the library facade and return a JSON-safe dict.
+
+All tools operate on local file paths. ``generate_doc`` / ``edit_doc`` need
+an Anthropic key (``api_key=`` on the dispatcher or ``ANTHROPIC_API_KEY``);
+the other seven are deterministic and keyless.
 """
 
 from __future__ import annotations
@@ -18,137 +27,59 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-__all__ = ["ANTHROPIC_TOOLS", "TOOL_NAMES", "run_tool", "run_tool_async"]
+__all__ = [
+    "ANTHROPIC_TOOLS",
+    "OPENAI_TOOLS",
+    "TOOL_NAMES",
+    "tool_specs",
+    "run_tool",
+    "run_tool_async",
+]
 
 _DOC_PATH = {
     "type": "string",
     "description": "Path to a local document (.docx / .xlsx / .pptx).",
 }
 
+# Frontmatter tier: every description is intentionally compact (enforced by
+# tests). The detailed shapes/recipes live behind doc_guide(topic).
 ANTHROPIC_TOOLS: list[dict[str, Any]] = [
     {
-        "name": "generate_doc",
+        "name": "doc_guide",
         "description": (
-            "Generate a complete document from a one-line intent; the OUTPUT "
-            "file extension picks the engine: .docx (Word report/proposal), "
-            ".xlsx (Excel workbook with styled sheets, real numbers, "
-            "formulas), .pptx (full presentation pipeline — supports "
-            "template/deck_mode/pages). Optionally ground the content in "
-            "source documents. English-first; Korean and any other language work equally. PPTX "
-            "generation is slow (minutes); DOCX/XLSX take one model call."
+            "START HERE for .docx/.xlsx/.pptx work — the document skill. "
+            "No topic: the GENERATE|EDIT|INSPECT map. topic: deep guide "
+            "(build, generate, edit, edit.text, edit.chart, edit.xml, "
+            "render, recipes.slides, recipes.colors). Free, instant."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "intent": {
+                "topic": {
                     "type": "string",
-                    "description": "What the document is for, e.g. '3분기 실적 보고서'.",
+                    "description": "Optional topic or prefix (e.g. 'recipes').",
                 },
-                "output": {
-                    "type": "string",
-                    "description": "Output path — extension (.docx/.xlsx/.pptx) selects the format.",
-                },
-                "sources": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Optional source document paths (PDF/DOCX/PPTX/XLSX/HTML).",
-                },
-                "template": {
-                    "type": "string",
-                    "description": "PPTX only: existing deck to inherit design from.",
-                },
-                "deck_mode": {
-                    "type": "string",
-                    "enum": ["new", "template_restyle", "template_extend"],
-                    "description": "PPTX only: how to use the template (default new).",
-                },
-                "pages": {
-                    "type": "array",
-                    "items": {"type": "integer"},
-                    "minItems": 2,
-                    "maxItems": 2,
-                    "description": "PPTX only: target [min, max] page count.",
-                },
-                "lang": {"type": "string", "description": "BCP-47, default en-US."},
             },
-            "required": ["intent", "output"],
         },
     },
     {
-        "name": "build_doc",
+        "name": "analyze_doc",
         "description": (
-            "Build a NEW document from a structured spec you already wrote — "
-            "DETERMINISTIC, no LLM, no key. This is generate_doc's engine "
-            "without the model: YOU produce the interchange artifact, this "
-            "renders the file instantly. The OUTPUT extension picks the "
-            "engine and the required `spec` shape:\n"
-            "  • .docx ← `spec` is a MARKDOWN string (headings, paragraphs, "
-            "lists, tables, **bold**/*italic*).\n"
-            "  • .xlsx ← `spec` is an object "
-            '{"sheets": [{"name","headers":[...],"rows":[[...]]}]}.\n'
-            "  • .pptx ← `spec` is an object "
-            '{"slides": [{"layout","title","subtitle"|"bullets","notes"}]}. '
-            "layout ∈ title|content|section|title_only|two_content|blank "
-            "(default content). bullets accept strings or {text,level}. "
-            "pptx uses standard built-in layouts (no design pipeline — use "
-            "generate_doc for that)."
+            "Outline + edit addresses + charts list for a document. "
+            "Deterministic, no key. Run FIRST before any edit. "
+            "Guide: doc_guide('edit')."
         ),
         "input_schema": {
             "type": "object",
-            "properties": {
-                "spec": {
-                    "type": ["string", "object"],
-                    "description": (
-                        "docx: markdown string. xlsx: {sheets:[...]}. "
-                        "pptx: {slides:[...]}. Must match the output format."
-                    ),
-                },
-                "output": {
-                    "type": "string",
-                    "description": "Output path — extension (.docx/.xlsx/.pptx) selects the format.",
-                },
-                "lang": {"type": "string", "description": "BCP-47, default en-US."},
-            },
-            "required": ["spec", "output"],
-        },
-    },
-    {
-        "name": "edit_doc",
-        "description": (
-            "Apply one natural-language edit turn to an existing document "
-            "(.docx/.xlsx/.pptx — extension picks the engine): '2번 문단 "
-            "수치를 15%로 바꿔줘', 'B3 셀을 142로', '3번 슬라이드 제목 바꿔줘'. "
-            "Untouched content survives byte-identical. Question-only "
-            "instructions are answered in `reply` without changing the "
-            "file. Attach reference documents via `sources`."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "doc": _DOC_PATH,
-                "instruction": {"type": "string"},
-                "output": {
-                    "type": "string",
-                    "description": "Output path (default: <input>_edited.<ext>).",
-                },
-                "sources": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Reference document paths for this edit.",
-                },
-                "lang": {"type": "string", "description": "BCP-47, default en-US."},
-            },
-            "required": ["doc", "instruction"],
+            "properties": {"doc": _DOC_PATH},
+            "required": ["doc"],
         },
     },
     {
         "name": "render_doc",
         "description": (
-            "Render/inspect a .pptx/.docx/.xlsx — LibreOffice-free native "
-            "pipeline. to='png' writes page-1.png..N, to='pdf' one "
-            "<stem>.pdf, to='svg' the vector pages, to='md' readable "
-            "content (preview.md for docx/xlsx, per-slide SVGs for pptx). "
-            "Deterministic, no LLM, no key."
+            "Render a document: to=md (read the content) | svg | png | pdf. "
+            "Deterministic, no key. Guide: doc_guide('render')."
         ),
         "input_schema": {
             "type": "object",
@@ -157,16 +88,13 @@ ANTHROPIC_TOOLS: list[dict[str, Any]] = [
                 "to": {
                     "type": "string",
                     "enum": ["png", "pdf", "svg", "md"],
-                    "description": "Output kind (default png).",
+                    "description": "Output kind (default png; md = readable).",
                 },
                 "out_dir": {
                     "type": "string",
                     "description": "Output directory (default <doc dir>/render).",
                 },
-                "dpi": {
-                    "type": "number",
-                    "description": "Raster resolution (default 144).",
-                },
+                "dpi": {"type": "number", "description": "Raster dpi (default 144)."},
             },
             "required": ["doc"],
         },
@@ -174,18 +102,10 @@ ANTHROPIC_TOOLS: list[dict[str, Any]] = [
     {
         "name": "set_doc_text",
         "description": (
-            "Deterministic structured edits — text AND charts in one call "
-            "(instant, no LLM). Untouched content is byte-preserved. "
-            "Addresses come from analyze_doc: .docx -> "
-            "{action: replace|insert_after|delete, para | table/row/col, "
-            "new_text|markdown}; .xlsx -> {action: set_cell|append_rows|"
-            "add_sheet, sheet, cell, value, rows}; .pptx -> {slide, "
-            "shape_id, para, new_text, row/col for tables}. CHART edits "
-            "(any format) carry a `chart` index from analyze_doc's "
-            "'charts' list: {chart: i, title: '...'} retitles; {chart: i, "
-            "categories: [...], series: [{name, values: [...]}]} sets the "
-            "data AND the embedded workbook (Office double-click-edit "
-            "matches). Prefer this over edit_doc for value/text/data swaps."
+            "Deterministic structured edits at analyze_doc addresses — "
+            "text/table/cell values AND chart title/data ({chart: i, ...}). "
+            "No key; byte-preserves the rest. Shapes: doc_guide('edit.text'), "
+            "doc_guide('edit.chart')."
         ),
         "input_schema": {
             "type": "object",
@@ -195,8 +115,8 @@ ANTHROPIC_TOOLS: list[dict[str, Any]] = [
                     "type": "array",
                     "items": {"type": "object"},
                     "description": (
-                        "Edit objects; ones with a `chart` key address "
-                        "charts, the rest are format-specific text edits."
+                        "Edit objects; a `chart` key routes to the chart "
+                        "engine. Shapes: doc_guide('edit.text')."
                     ),
                 },
                 "output": {
@@ -210,14 +130,9 @@ ANTHROPIC_TOOLS: list[dict[str, Any]] = [
     {
         "name": "read_doc_xml",
         "description": (
-            "DOCX/XLSX/PPTX are zips of XML — this reads that XML directly. "
-            "Deterministic, no LLM, no key. Without `part`: list every part "
-            "in the package (slides, charts, styles, themes, sheets...). "
-            "With `part` (e.g. ppt/slides/slide1.xml, ppt/charts/chart1.xml, "
-            "word/document.xml): return that part's exact XML text. Read the "
-            "XML, copy exact substrings, then patch them with set_doc_xml — "
-            "together they express EVERY edit OOXML can (colors, fills, "
-            "fonts, geometry, chart styling...) without python-pptx."
+            "Documents are zips of XML. No part: the part map. With part: "
+            "that part's exact XML text. Pair with set_doc_xml for ANY edit "
+            "(colors, fonts, slides). Guide: doc_guide('edit.xml')."
         ),
         "input_schema": {
             "type": "object",
@@ -234,17 +149,10 @@ ANTHROPIC_TOOLS: list[dict[str, Any]] = [
     {
         "name": "set_doc_xml",
         "description": (
-            "Patch, CREATE or DELETE one XML part. Deterministic, no LLM, "
-            "no key — the universal escape hatch for everything the "
-            "structured verbs don't cover: recolor bars/shapes, fonts, "
-            "fills, geometry, add/remove slides. `edits` patches an "
-            "existing part (`find` must match read_doc_xml's text EXACTLY, "
-            "count 0 = all). `xml` replaces the whole part — and CREATES "
-            "it if missing (pass `content_type` to register the new part, "
-            "e.g. adding slideN.xml + its _rels/*.rels, then patching "
-            "presentation.xml + its rels = a new slide). `delete: true` "
-            "removes the part. The result must stay well-formed XML or "
-            "nothing is written; untouched parts stay byte-identical."
+            "Patch (find/replace), CREATE (xml + content_type) or DELETE one "
+            "XML part. Well-formed-or-nothing; byte-preserving. The universal "
+            "edit — recolor, fonts, add/remove slides. Recipes: "
+            "doc_guide('recipes.slides'), doc_guide('recipes.colors')."
         ),
         "input_schema": {
             "type": "object",
@@ -252,7 +160,7 @@ ANTHROPIC_TOOLS: list[dict[str, Any]] = [
                 "doc": _DOC_PATH,
                 "part": {
                     "type": "string",
-                    "description": "Part to patch/create/delete, e.g. ppt/charts/chart1.xml.",
+                    "description": "Part, e.g. ppt/charts/chart1.xml.",
                 },
                 "edits": {
                     "type": "array",
@@ -265,23 +173,19 @@ ANTHROPIC_TOOLS: list[dict[str, Any]] = [
                         },
                         "required": ["find", "replace"],
                     },
-                    "description": "Exact-substring edits (one mode: edits | xml | delete).",
+                    "description": "Exact-substring edits (mode: edits|xml|delete).",
                 },
                 "xml": {
                     "type": "string",
-                    "description": "Full part XML — replaces, or creates a missing part.",
+                    "description": "Full part XML — replaces, or creates if missing.",
                 },
                 "content_type": {
                     "type": "string",
-                    "description": (
-                        "[Content_Types].xml Override for a NEWLY created part, "
-                        "e.g. application/vnd.openxmlformats-officedocument."
-                        "presentationml.slide+xml"
-                    ),
+                    "description": "Content-type Override for a newly created part.",
                 },
                 "delete": {
                     "type": "boolean",
-                    "description": "Remove the part (also patch referencing rels).",
+                    "description": "Remove the part (patch referencing rels too).",
                 },
                 "output": {
                     "type": "string",
@@ -292,24 +196,128 @@ ANTHROPIC_TOOLS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "analyze_doc",
+        "name": "build_doc",
         "description": (
-            "Inspect a document's structure and get the exact addresses "
-            "set_doc_text needs: .docx -> paragraph/table-cell outline "
-            "with indices; .xlsx -> sheets, dimensions, sample rows; "
-            ".pptx -> slides, theme, per-paragraph shape ids. Every format "
-            "also returns a 'charts' list (kinds/titles/series) for chart "
-            "edits. Deterministic, no LLM, no key. Call before editing."
+            "GENERATE (deterministic): build a NEW document from YOUR spec — "
+            ".docx←markdown, .xlsx←{sheets}, .pptx←{slides}. Instant, no key. "
+            "Spec shapes: doc_guide('build')."
         ),
         "input_schema": {
             "type": "object",
-            "properties": {"doc": _DOC_PATH},
-            "required": ["doc"],
+            "properties": {
+                "spec": {
+                    "type": ["string", "object"],
+                    "description": (
+                        "docx: markdown string. xlsx: {sheets:[...]}. "
+                        "pptx: {slides:[...]}. Must match the output format."
+                    ),
+                },
+                "output": {
+                    "type": "string",
+                    "description": "Output path — extension selects the engine.",
+                },
+                "lang": {"type": "string", "description": "BCP-47, default en-US."},
+            },
+            "required": ["spec", "output"],
+        },
+    },
+    {
+        "name": "generate_doc",
+        "description": (
+            "GENERATE (LLM): a complete designed document from a one-line "
+            "intent (Anthropic key; .pptx is slow — minutes). Options: "
+            "doc_guide('generate'). Keyless alternative: build_doc."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "intent": {
+                    "type": "string",
+                    "description": "What the document is for.",
+                },
+                "output": {
+                    "type": "string",
+                    "description": "Output path — extension selects the engine.",
+                },
+                "sources": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional grounding documents (paths).",
+                },
+                "template": {
+                    "type": "string",
+                    "description": "PPTX only: deck to inherit design from.",
+                },
+                "deck_mode": {
+                    "type": "string",
+                    "enum": ["new", "template_restyle", "template_extend"],
+                    "description": "PPTX only (default new).",
+                },
+                "pages": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "description": "PPTX only: [min, max] page count.",
+                },
+                "lang": {"type": "string", "description": "BCP-47, default en-US."},
+            },
+            "required": ["intent", "output"],
+        },
+    },
+    {
+        "name": "edit_doc",
+        "description": (
+            "EDIT (LLM): one natural-language edit turn (Anthropic key). "
+            "Prefer the deterministic path: analyze_doc → set_doc_text / "
+            "set_doc_xml. Guide: doc_guide('edit')."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "doc": _DOC_PATH,
+                "instruction": {"type": "string"},
+                "output": {
+                    "type": "string",
+                    "description": "Output path (default: <input>_edited.<ext>).",
+                },
+                "sources": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Reference documents for this edit.",
+                },
+                "lang": {"type": "string", "description": "BCP-47, default en-US."},
+            },
+            "required": ["doc", "instruction"],
         },
     },
 ]
 
 TOOL_NAMES = [t["name"] for t in ANTHROPIC_TOOLS]
+
+# The same set in OpenAI function-calling format — every backend gets the
+# identical hierarchy, names and compact descriptions.
+OPENAI_TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": t["name"],
+            "description": t["description"],
+            "parameters": t["input_schema"],
+        },
+    }
+    for t in ANTHROPIC_TOOLS
+]
+
+
+def tool_specs(fmt: str = "anthropic") -> list[dict[str, Any]]:
+    """The tool list for a backend: ``fmt`` = ``anthropic`` | ``openai``."""
+    fmt = (fmt or "anthropic").strip().lower()
+    if fmt == "anthropic":
+        return ANTHROPIC_TOOLS
+    if fmt == "openai":
+        return OPENAI_TOOLS
+    raise ValueError(f"unknown tool-spec format: {fmt!r} (anthropic | openai)")
 
 
 async def run_tool_async(
@@ -319,6 +327,10 @@ async def run_tool_async(
     from . import simple
 
     args = dict(tool_input)
+    if name == "doc_guide":
+        from .agent_guide import doc_guide
+
+        return doc_guide(args.get("topic"))
     if name == "generate_doc":
         pages_raw = args.pop("pages", None)
         pages = tuple(pages_raw) if pages_raw and len(pages_raw) == 2 else (8, 12)
@@ -365,7 +377,6 @@ async def run_tool_async(
             "format": result.format,
             "to": result.to,
         }
-
     if name == "set_doc_text":
         # One structured-edit surface: dicts with a `chart` key go to the
         # chart engine, the rest to the text engine, chained on one output.

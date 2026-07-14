@@ -226,8 +226,9 @@ class TestUnifiedFacade:
         from edit2docs.agent_tools import TOOL_NAMES, run_tool
 
         assert TOOL_NAMES == [
-            "generate_doc", "build_doc", "edit_doc", "render_doc",
-            "set_doc_text", "read_doc_xml", "set_doc_xml", "analyze_doc",
+            "doc_guide", "analyze_doc", "render_doc", "set_doc_text",
+            "read_doc_xml", "set_doc_xml", "build_doc", "generate_doc",
+            "edit_doc",
         ]
         docx_path = tmp_path / "r.docx"
         docx_path.write_bytes(docx_from_markdown(DOC_MD))

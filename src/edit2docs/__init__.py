@@ -19,7 +19,7 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 
 _LAZY: dict[str, str] = {
     # Unified, extension-dispatched verbs (docx / xlsx / pptx)
@@ -49,10 +49,14 @@ _LAZY: dict[str, str] = {
     "GenerateResult": ".simple",
     "EditResult": ".simple",
     "TextEditsResult": ".simple",
-    # Agent tool surface
+    # Agent tool surface (hierarchical, progressive-disclosure)
     "ANTHROPIC_TOOLS": ".agent_tools",
+    "OPENAI_TOOLS": ".agent_tools",
+    "TOOL_NAMES": ".agent_tools",
+    "tool_specs": ".agent_tools",
     "run_tool": ".agent_tools",
     "run_tool_async": ".agent_tools",
+    "doc_guide": ".agent_guide",
 }
 
 __all__ = ["__version__", *sorted(_LAZY)]

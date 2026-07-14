@@ -100,14 +100,39 @@ class TestFacadeDeterministicVerbs:
 class TestAgentTools:
     def test_schemas_are_anthropic_shaped(self):
         assert TOOL_NAMES == [
-            "generate_doc", "build_doc", "edit_doc", "render_doc",
-            "set_doc_text", "read_doc_xml", "set_doc_xml", "analyze_doc",
+            "doc_guide", "analyze_doc", "render_doc", "set_doc_text",
+            "read_doc_xml", "set_doc_xml", "build_doc", "generate_doc",
+            "edit_doc",
         ]
         for tool in ANTHROPIC_TOOLS:
             assert set(tool) == {"name", "description", "input_schema"}
             schema = tool["input_schema"]
             assert schema["type"] == "object"
-            assert schema["required"], tool["name"]
+            if tool["name"] != "doc_guide":  # guide's only param is optional
+                assert schema["required"], tool["name"]
+
+    def test_descriptions_stay_compact(self):
+        """Progressive disclosure contract: the frontmatter tier must stay
+        small — fat how-to lives behind doc_guide(topic)."""
+        for tool in ANTHROPIC_TOOLS:
+            assert len(tool["description"]) <= 320, (
+                f"{tool['name']} description grew to "
+                f"{len(tool['description'])} chars — move detail into "
+                "agent_guide GUIDES instead"
+            )
+
+    def test_openai_surface_matches(self):
+        from edit2docs.agent_tools import OPENAI_TOOLS, tool_specs
+
+        assert [t["function"]["name"] for t in OPENAI_TOOLS] == TOOL_NAMES
+        for a, o in zip(ANTHROPIC_TOOLS, OPENAI_TOOLS):
+            assert o["type"] == "function"
+            assert o["function"]["description"] == a["description"]
+            assert o["function"]["parameters"] == a["input_schema"]
+        assert tool_specs("openai") is OPENAI_TOOLS
+        assert tool_specs("anthropic") is ANTHROPIC_TOOLS
+        with pytest.raises(ValueError):
+            tool_specs("gemini")
 
     def test_dispatch_deterministic_tools(self, deck_path, tmp_path):
         info = run_tool("analyze_doc", {"doc": str(deck_path)})
@@ -121,6 +146,53 @@ class TestAgentTools:
     def test_unknown_tool_raises(self):
         with pytest.raises(ValueError, match="unknown edit2docs tool"):
             run_tool("rm_rf_slash", {})
+
+
+class TestDocGuide:
+    """The hierarchical skill guide — progressive disclosure entry point."""
+
+    def test_root_map_splits_generate_and_edit(self):
+        res = run_tool("doc_guide", {})
+        assert res["topic"] == ""
+        assert "GENERATE" in res["guide"] and "EDIT" in res["guide"]
+        # every tool is discoverable from the root map
+        for name in TOOL_NAMES:
+            assert name in res["guide"], f"{name} missing from root map"
+        assert res["topics"]
+
+    def test_every_topic_resolves(self):
+        from edit2docs.agent_guide import TOPICS
+
+        for topic in TOPICS:
+            res = run_tool("doc_guide", {"topic": topic})
+            assert res["topic"] == topic
+            assert len(res["guide"]) > 100, topic
+
+    def test_parent_prefix_joins_children(self):
+        res = run_tool("doc_guide", {"topic": "recipes"})
+        assert "ADD A SLIDE" in res["guide"]
+        assert "RECOLOR" in res["guide"]
+
+    def test_exact_topic_lists_subtopics(self):
+        res = run_tool("doc_guide", {"topic": "edit"})
+        assert "Subtopics:" in res["guide"]
+        assert "edit.xml" in res["guide"]
+
+    def test_unknown_topic_is_never_a_dead_end(self):
+        res = run_tool("doc_guide", {"topic": "no-such-thing"})
+        assert "GENERATE" in res["guide"]  # falls back to the map
+        assert res["topics"]
+
+    def test_host_name_mapping(self):
+        """Hosts that rename tools (geny-executor) get the guide rendered
+        with THEIR names."""
+        from edit2docs.agent_guide import doc_guide
+
+        names = {"analyze_doc": "DocAnalyze", "set_doc_xml": "DocXmlEdit",
+                 "doc_guide": "DocGuide"}
+        res = doc_guide("recipes.slides", names=names)
+        assert "DocXmlEdit" in res["guide"]
+        assert "set_doc_xml" not in res["guide"]
 
 
 class TestBuildDoc:
