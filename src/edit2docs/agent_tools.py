@@ -249,6 +249,75 @@ ANTHROPIC_TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "read_doc_xml",
+        "description": (
+            "DOCX/XLSX/PPTX are zips of XML — this reads that XML directly. "
+            "Deterministic, no LLM, no key. Without `part`: list every part "
+            "in the package (slides, charts, styles, themes, sheets...). "
+            "With `part` (e.g. ppt/slides/slide1.xml, ppt/charts/chart1.xml, "
+            "word/document.xml): return that part's exact XML text. Read the "
+            "XML, copy exact substrings, then patch them with set_doc_xml — "
+            "together they express EVERY edit OOXML can (colors, fills, "
+            "fonts, geometry, chart styling...) without python-pptx."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "doc": _DOC_PATH,
+                "part": {
+                    "type": "string",
+                    "description": "Part name to read. Omit to list all parts.",
+                },
+            },
+            "required": ["doc"],
+        },
+    },
+    {
+        "name": "set_doc_xml",
+        "description": (
+            "Patch one XML part with exact find/replace edits (or replace "
+            "the whole part via `xml`). Deterministic, no LLM, no key — the "
+            "universal escape hatch for edits the structured verbs don't "
+            "cover: recolor chart bars/shapes, fonts, fills, geometry, "
+            "anything. `find` must match the part text from read_doc_xml "
+            "EXACTLY (count 0 = replace all). The result must stay "
+            "well-formed XML or nothing is written; untouched parts stay "
+            "byte-identical."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "doc": _DOC_PATH,
+                "part": {
+                    "type": "string",
+                    "description": "Part to patch, e.g. ppt/charts/chart1.xml.",
+                },
+                "edits": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "find": {"type": "string"},
+                            "replace": {"type": "string"},
+                            "count": {"type": "integer"},
+                        },
+                        "required": ["find", "replace"],
+                    },
+                    "description": "Exact-substring edits (use OR `xml`).",
+                },
+                "xml": {
+                    "type": "string",
+                    "description": "Full replacement XML for the part (use OR `edits`).",
+                },
+                "output": {
+                    "type": "string",
+                    "description": "Output path (default: <input>_edited.<ext>).",
+                },
+            },
+            "required": ["doc", "part"],
+        },
+    },
+    {
         "name": "analyze_doc",
         "description": (
             "Inspect a document's structure and get the exact addresses "
@@ -348,6 +417,24 @@ async def run_tool_async(
         }
     if name == "analyze_doc":
         return simple.analyze_doc(args["doc"])
+    if name == "read_doc_xml":
+        part = args.get("part")
+        if not part:
+            return {"parts": simple.list_doc_parts(args["doc"])}
+        return {"part": part, "xml": simple.get_doc_xml(args["doc"], part)}
+    if name == "set_doc_xml":
+        result = simple.set_doc_xml(
+            args["doc"],
+            args["part"],
+            args.get("edits"),
+            xml=args.get("xml"),
+            output=args.get("output"),
+        )
+        return {
+            "path": str(result.path),
+            "applied": result.applied,
+            "results": result.results,
+        }
     if name == "build_doc":
         result = simple.build_doc(
             args["spec"], args["output"], lang=args.get("lang")

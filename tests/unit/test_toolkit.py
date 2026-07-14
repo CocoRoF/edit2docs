@@ -101,7 +101,8 @@ class TestAgentTools:
     def test_schemas_are_anthropic_shaped(self):
         assert TOOL_NAMES == [
             "generate_doc", "build_doc", "edit_doc", "preview_doc",
-            "render_doc", "set_doc_text", "edit_chart", "analyze_doc",
+            "render_doc", "set_doc_text", "edit_chart", "read_doc_xml",
+            "set_doc_xml", "analyze_doc",
         ]
         for tool in ANTHROPIC_TOOLS:
             assert set(tool) == {"name", "description", "input_schema"}
@@ -174,6 +175,101 @@ class TestBuildDoc:
     def test_build_pptx_rejects_empty_slides(self, tmp_path):
         with pytest.raises(ValueError, match="slides"):
             run_tool("build_doc", {"spec": {"slides": []}, "output": str(tmp_path / "x.pptx")})
+
+
+class TestDocXml:
+    """Direct OOXML XML editing — the universal deterministic escape hatch."""
+
+    @pytest.fixture
+    def chart_deck(self, tmp_path: Path) -> Path:
+        from pptx.chart.data import CategoryChartData
+        from pptx.enum.chart import XL_CHART_TYPE
+
+        prs = Presentation()
+        slide = prs.slides.add_slide(prs.slide_layouts[5])
+        cd = CategoryChartData()
+        cd.categories = ["A", "B", "C"]
+        cd.add_series("S1", (1, 2, 3))
+        slide.shapes.add_chart(
+            XL_CHART_TYPE.COLUMN_CLUSTERED,
+            Inches(1), Inches(1), Inches(6), Inches(4), cd,
+        )
+        p = tmp_path / "chart.pptx"
+        prs.save(str(p))
+        return p
+
+    def test_list_parts_maps_the_package(self, chart_deck):
+        res = run_tool("read_doc_xml", {"doc": str(chart_deck)})
+        names = [p["part"] for p in res["parts"]]
+        assert any("slides/slide1.xml" in n for n in names)
+        assert any("charts/chart1.xml" in n for n in names)
+
+    def test_read_one_part_returns_exact_xml(self, chart_deck):
+        res = run_tool(
+            "read_doc_xml", {"doc": str(chart_deck), "part": "ppt/charts/chart1.xml"}
+        )
+        assert "<c:ser>" in res["xml"] and "S1" in res["xml"]
+
+    def test_recolor_chart_series_via_xml_patch(self, chart_deck, tmp_path):
+        """THE user scenario: change bar color — impossible via edit_chart,
+        trivial via a direct XML patch on the series properties."""
+        out = tmp_path / "red.pptx"
+        res = run_tool(
+            "set_doc_xml",
+            {
+                "doc": str(chart_deck),
+                "part": "ppt/charts/chart1.xml",
+                "edits": [{
+                    "find": "</c:tx>",
+                    "replace": (
+                        "</c:tx><c:spPr><a:solidFill>"
+                        '<a:srgbClr val="FF0000"/>'
+                        "</a:solidFill></c:spPr>"
+                    ),
+                }],
+                "output": str(out),
+            },
+        )
+        assert res["applied"] == 1, res
+        # python-pptx sees the explicit red fill on the series.
+        prs = Presentation(str(out))
+        chart = next(
+            s for sl in prs.slides for s in sl.shapes if s.has_chart
+        ).chart
+        fill = chart.series[0].format.fill
+        assert str(fill.fore_color.rgb) == "FF0000"
+
+    def test_malformed_result_is_rejected_not_written(self, chart_deck):
+        res = run_tool(
+            "set_doc_xml",
+            {
+                "doc": str(chart_deck),
+                "part": "ppt/charts/chart1.xml",
+                "edits": [{"find": "</c:chartSpace>", "replace": "<broken"}],
+            },
+        )
+        assert res["applied"] == 0
+        assert any(r["status"] == "invalid" for r in res["results"])
+        # Nothing was written: the source still parses.
+        assert Presentation(str(chart_deck))
+
+    def test_not_found_reports_status(self, chart_deck):
+        res = run_tool(
+            "set_doc_xml",
+            {
+                "doc": str(chart_deck),
+                "part": "ppt/charts/chart1.xml",
+                "edits": [{"find": "<no-such-element/>", "replace": "x"}],
+            },
+        )
+        assert res["applied"] == 0
+        assert res["results"][0]["status"] == "not_found"
+
+    def test_missing_part_suggests_names(self, chart_deck):
+        with pytest.raises(ValueError, match="chart1.xml"):
+            run_tool(
+                "read_doc_xml", {"doc": str(chart_deck), "part": "chart1.xml"}
+            )
 
 
 class TestLocalMcpServer:

@@ -218,4 +218,48 @@ def build_local_mcp_server() -> FastMCP:
             "warnings": result.warnings,
         }
 
+    @mcp.tool(
+        name="read_doc_xml",
+        description=(
+            "DOCX/XLSX/PPTX are zips of XML — read that XML directly "
+            "(deterministic, no LLM, no key). Without `part`: list every "
+            "part in the package. With `part` (ppt/slides/slide1.xml, "
+            "ppt/charts/chart1.xml, word/document.xml...): return its exact "
+            "XML text. Pair with set_doc_xml to express EVERY edit OOXML "
+            "can (colors, fills, fonts, geometry, chart styling...)."
+        ),
+    )
+    async def read_doc_xml_tool(
+        doc: str, part: str | None = None
+    ) -> dict[str, Any]:
+        if not part:
+            return {"parts": simple.list_doc_parts(doc)}
+        return {"part": part, "xml": simple.get_doc_xml(doc, part)}
+
+    @mcp.tool(
+        name="set_doc_xml",
+        description=(
+            "Patch one XML part with exact find/replace edits, or replace "
+            "it whole via `xml` (deterministic, no LLM, no key). The "
+            "universal escape hatch for edits the structured verbs don't "
+            "cover — recolor bars/shapes, fonts, fills, geometry. `find` "
+            "must match read_doc_xml's text EXACTLY (count 0 = all). The "
+            "result must stay well-formed XML or nothing is written; "
+            "untouched parts stay byte-identical."
+        ),
+    )
+    async def set_doc_xml_tool(
+        doc: str,
+        part: str,
+        edits: list[dict] | None = None,
+        xml: str | None = None,
+        output: str | None = None,
+    ) -> dict[str, Any]:
+        result = simple.set_doc_xml(doc, part, edits, xml=xml, output=output)
+        return {
+            "path": str(result.path),
+            "applied": result.applied,
+            "results": result.results,
+        }
+
     return mcp

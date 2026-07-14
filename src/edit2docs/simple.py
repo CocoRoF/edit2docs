@@ -36,12 +36,16 @@ __all__ = [
     "TextEditsResult",
     # Unified, extension-dispatched verbs (docx / xlsx / pptx)
     "generate_doc",
+    "build_doc",
     "edit_doc",
     "preview_doc",
     "set_doc_text",
     "edit_chart",
     "list_charts",
     "analyze_doc",
+    "list_doc_parts",
+    "get_doc_xml",
+    "set_doc_xml",
     "async_generate_doc",
     "async_edit_doc",
     # PPTX-specific surface (full deck pipeline)
@@ -790,6 +794,75 @@ def set_doc_text(
             for r in results
         ]
 
+    applied = sum(1 for r in results if r.status == "applied")
+    out = Path(output) if output is not None else _default_output(doc, "_edited")
+    if applied > 0:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(new_content)
+    else:
+        out = Path(doc)
+    return TextEditsResult(path=out, applied=applied, results=dumped)
+
+
+def list_doc_parts(doc: str | Path) -> list[dict]:
+    """Every XML/binary part in the OOXML package — the addresses
+    :func:`get_doc_xml` / :func:`set_doc_xml` take. Deterministic, no LLM.
+
+    DOCX/XLSX/PPTX are zips of XML parts; this is the map of the whole
+    document (``ppt/slides/slide1.xml``, ``ppt/charts/chart1.xml``,
+    ``word/document.xml``, ``xl/worksheets/sheet1.xml``, ...).
+    """
+    from .documents.xml_edit import list_parts
+
+    _fmt_of(doc)  # gate to the supported formats
+    return list_parts(_read_pptx(doc))
+
+
+def get_doc_xml(doc: str | Path, part: str) -> str:
+    """One part's XML text, exactly as stored. Deterministic, no LLM.
+
+    Read this, copy exact substrings, and hand them to :func:`set_doc_xml`
+    as find/replace edits — that covers every edit OOXML can express
+    (colors, fills, fonts, geometry, chart styling, ...).
+    """
+    from .documents.xml_edit import get_xml
+
+    _fmt_of(doc)
+    return get_xml(_read_pptx(doc), part)
+
+
+def set_doc_xml(
+    doc: str | Path,
+    part: str,
+    edits: list[dict] | None = None,
+    *,
+    xml: str | None = None,
+    output: str | Path | None = None,
+) -> TextEditsResult:
+    """Patch one XML part with exact find/replace edits (or replace it whole).
+    Deterministic, no LLM — the universal escape hatch for edits the
+    structured verbs don't cover.
+
+    Each edit is ``{"find": str, "replace": str, "count": int (0=all)}``;
+    substrings must match the part text from :func:`get_doc_xml` exactly.
+    The result must stay well-formed XML or nothing is written. Untouched
+    parts stay byte-identical.
+    """
+    from .documents.xml_edit import apply_xml_edits, coerce_edit
+
+    _fmt_of(doc)
+    content = _read_pptx(doc)
+    typed = [coerce_edit(e) for e in edits] if edits is not None else None
+    new_content, results = apply_xml_edits(content, part, typed, xml=xml)
+    dumped = [
+        {
+            "find": r.find[:120],
+            "status": r.status,
+            "occurrences": r.occurrences,
+            "message": r.message,
+        }
+        for r in results
+    ]
     applied = sum(1 for r in results if r.status == "applied")
     out = Path(output) if output is not None else _default_output(doc, "_edited")
     if applied > 0:
