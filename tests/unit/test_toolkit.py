@@ -100,8 +100,8 @@ class TestFacadeDeterministicVerbs:
 class TestAgentTools:
     def test_schemas_are_anthropic_shaped(self):
         assert TOOL_NAMES == [
-            "generate_doc", "edit_doc", "preview_doc", "render_doc",
-            "set_doc_text", "edit_chart", "analyze_doc",
+            "generate_doc", "build_doc", "edit_doc", "preview_doc",
+            "render_doc", "set_doc_text", "edit_chart", "analyze_doc",
         ]
         for tool in ANTHROPIC_TOOLS:
             assert set(tool) == {"name", "description", "input_schema"}
@@ -120,6 +120,60 @@ class TestAgentTools:
     def test_unknown_tool_raises(self):
         with pytest.raises(ValueError, match="unknown edit2docs tool"):
             run_tool("rm_rf_slash", {})
+
+
+class TestBuildDoc:
+    """Deterministic generation — generate_doc's engine without the model."""
+
+    def test_build_docx_from_markdown(self, tmp_path):
+        out = tmp_path / "r.docx"
+        res = run_tool(
+            "build_doc",
+            {"spec": "# Report\n\nBody **text**.\n\n- a\n- b", "output": str(out)},
+        )
+        assert Path(res["path"]) == out and out.exists()
+        info = edit2docs.analyze_doc(str(out))
+        assert info["format"] == "docx"
+
+    def test_build_xlsx_from_spec(self, tmp_path):
+        out = tmp_path / "r.xlsx"
+        res = run_tool(
+            "build_doc",
+            {
+                "spec": {"sheets": [{"name": "S", "headers": ["x", "y"],
+                                     "rows": [[1, 2], [3, 4]]}]},
+                "output": str(out),
+            },
+        )
+        assert res["page_count"] == 1 and out.exists()
+        assert "3" in str(edit2docs.analyze_doc(str(out)))
+
+    def test_build_pptx_from_slide_spec(self, tmp_path):
+        out = tmp_path / "r.pptx"
+        res = run_tool(
+            "build_doc",
+            {
+                "spec": {"slides": [
+                    {"layout": "title", "title": "Deck", "subtitle": "2026"},
+                    {"layout": "content", "title": "Agenda",
+                     "bullets": ["A", {"text": "A.1", "level": 1}], "notes": "n"},
+                ]},
+                "output": str(out),
+            },
+        )
+        assert res["page_count"] == 2 and out.exists()
+        prs = Presentation(str(out))
+        assert len(prs.slides) == 2
+        assert prs.slides[0].shapes.title.text == "Deck"
+        assert prs.slides[1].shapes.title.text == "Agenda"
+
+    def test_build_pptx_rejects_wrong_spec_type(self, tmp_path):
+        with pytest.raises(ValueError, match="slides|dict"):
+            run_tool("build_doc", {"spec": "markdown", "output": str(tmp_path / "x.pptx")})
+
+    def test_build_pptx_rejects_empty_slides(self, tmp_path):
+        with pytest.raises(ValueError, match="slides"):
+            run_tool("build_doc", {"spec": {"slides": []}, "output": str(tmp_path / "x.pptx")})
 
 
 class TestLocalMcpServer:

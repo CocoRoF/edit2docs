@@ -26,6 +26,7 @@ import asyncio
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 DEFAULT_MODEL = "claude-opus-4-7"
 
@@ -797,3 +798,68 @@ def set_doc_text(
     else:
         out = Path(doc)
     return TextEditsResult(path=out, applied=applied, results=dumped)
+
+
+def build_doc(
+    spec: str | dict[str, Any],
+    output: str | Path,
+    *,
+    lang: str | None = None,
+) -> GenerateResult:
+    """Deterministically build a NEW document from a structured spec — no LLM,
+    no API key. The **output file extension picks the engine** (mirrors
+    :func:`generate_doc`, but the caller supplies the interchange artifact the
+    writer LLM would otherwise produce):
+
+    * ``.docx`` ← *spec* is a **markdown string** (the ``docx_from_markdown``
+      subset: headings, paragraphs, lists, tables, bold/italic).
+    * ``.xlsx`` ← *spec* is a **dict** ``{"sheets": [{"name", "headers",
+      "rows"}, ...]}`` (see :func:`~edit2docs.documents.xlsx_engine.xlsx_from_spec`).
+    * ``.pptx`` ← *spec* is a **dict** ``{"slides": [{"layout", "title",
+      "subtitle"/"bullets", "notes"}, ...]}`` (see
+      :func:`~edit2docs.documents.pptx_build.pptx_from_spec`).
+
+    This is the deterministic generation primitive: an agent (or the
+    ``generate_doc`` pipeline) does the thinking to produce *spec*, and this
+    renders the file with zero model calls. Raises ``ValueError`` on a spec
+    that doesn't match the target format.
+    """
+    fmt = _fmt_of(output)
+    out = Path(output)
+
+    page_count = 0
+    if fmt == "docx":
+        if not isinstance(spec, str):
+            raise ValueError(
+                "docx build spec must be a markdown string. "
+                "docx 빌드 스펙은 markdown 문자열이어야 합니다."
+            )
+        from .documents.docx_engine import docx_from_markdown
+
+        data = docx_from_markdown(spec, lang=lang)
+    elif fmt == "xlsx":
+        if not isinstance(spec, dict):
+            raise ValueError(
+                "xlsx build spec must be a {'sheets': [...]} dict. "
+                "xlsx 빌드 스펙은 {'sheets': [...]} 딕셔너리여야 합니다."
+            )
+        from .documents.xlsx_engine import xlsx_from_spec
+
+        data = xlsx_from_spec(spec)
+        page_count = len(spec.get("sheets") or [])
+    elif fmt == "pptx":
+        if not isinstance(spec, dict):
+            raise ValueError(
+                "pptx build spec must be a {'slides': [...]} dict. "
+                "pptx 빌드 스펙은 {'slides': [...]} 딕셔너리여야 합니다."
+            )
+        from .documents.pptx_build import pptx_from_spec
+
+        data = pptx_from_spec(spec, lang=lang)
+        page_count = len(spec.get("slides") or [])
+    else:  # pragma: no cover — _fmt_of already gates the format set
+        raise ValueError(f"unsupported build format: {fmt}")
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(data)
+    return GenerateResult(path=out, page_count=page_count, design_spec="", warnings=[])

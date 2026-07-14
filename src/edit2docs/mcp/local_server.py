@@ -193,4 +193,29 @@ def build_local_mcp_server() -> FastMCP:
     async def analyze_doc_tool(doc: str) -> dict[str, Any]:
         return simple.analyze_doc(doc)
 
+    @mcp.tool(
+        name="build_doc",
+        description=(
+            "Build a NEW document from a structured spec you wrote — "
+            "DETERMINISTIC, no LLM, no key (generate_doc's engine without the "
+            "model). The output extension picks the engine + `spec` shape: "
+            ".docx <- markdown string; .xlsx <- {sheets: [{name, headers, "
+            "rows}]}; .pptx <- {slides: [{layout, title, subtitle|bullets, "
+            "notes}]} (layout in title|content|section|title_only|two_content|"
+            "blank). pptx uses built-in layouts — use generate_doc for a "
+            "designed deck."
+        ),
+    )
+    async def build_doc_tool(
+        spec: str | dict[str, Any],
+        output: str,
+        lang: str | None = None,
+    ) -> dict[str, Any]:
+        result = simple.build_doc(spec, output, lang=lang)
+        return {
+            "path": str(result.path),
+            "page_count": result.page_count,
+            "warnings": result.warnings,
+        }
+
     return mcp

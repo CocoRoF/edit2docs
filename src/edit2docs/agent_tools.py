@@ -75,6 +75,44 @@ ANTHROPIC_TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "build_doc",
+        "description": (
+            "Build a NEW document from a structured spec you already wrote — "
+            "DETERMINISTIC, no LLM, no key. This is generate_doc's engine "
+            "without the model: YOU produce the interchange artifact, this "
+            "renders the file instantly. The OUTPUT extension picks the "
+            "engine and the required `spec` shape:\n"
+            "  • .docx ← `spec` is a MARKDOWN string (headings, paragraphs, "
+            "lists, tables, **bold**/*italic*).\n"
+            "  • .xlsx ← `spec` is an object "
+            '{"sheets": [{"name","headers":[...],"rows":[[...]]}]}.\n'
+            "  • .pptx ← `spec` is an object "
+            '{"slides": [{"layout","title","subtitle"|"bullets","notes"}]}. '
+            "layout ∈ title|content|section|title_only|two_content|blank "
+            "(default content). bullets accept strings or {text,level}. "
+            "pptx uses standard built-in layouts (no design pipeline — use "
+            "generate_doc for that)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "spec": {
+                    "type": ["string", "object"],
+                    "description": (
+                        "docx: markdown string. xlsx: {sheets:[...]}. "
+                        "pptx: {slides:[...]}. Must match the output format."
+                    ),
+                },
+                "output": {
+                    "type": "string",
+                    "description": "Output path — extension (.docx/.xlsx/.pptx) selects the format.",
+                },
+                "lang": {"type": "string", "description": "BCP-47, default en-US."},
+            },
+            "required": ["spec", "output"],
+        },
+    },
+    {
         "name": "edit_doc",
         "description": (
             "Apply one natural-language edit turn to an existing document "
@@ -310,6 +348,15 @@ async def run_tool_async(
         }
     if name == "analyze_doc":
         return simple.analyze_doc(args["doc"])
+    if name == "build_doc":
+        result = simple.build_doc(
+            args["spec"], args["output"], lang=args.get("lang")
+        )
+        return {
+            "path": str(result.path),
+            "page_count": result.page_count,
+            "warnings": result.warnings,
+        }
     raise ValueError(f"unknown edit2docs tool: {name!r} (known: {TOOL_NAMES})")
 
 

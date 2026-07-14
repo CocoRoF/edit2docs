@@ -19,11 +19,12 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 _LAZY: dict[str, str] = {
     # Unified, extension-dispatched verbs (docx / xlsx / pptx)
     "generate_doc": ".simple",
+    "build_doc": ".simple",
     "edit_doc": ".simple",
     "preview_doc": ".simple",
     "set_doc_text": ".simple",
