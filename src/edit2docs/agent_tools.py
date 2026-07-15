@@ -199,8 +199,10 @@ ANTHROPIC_TOOLS: list[dict[str, Any]] = [
         "name": "build_doc",
         "description": (
             "GENERATE (deterministic): build a NEW document from YOUR spec — "
-            ".docx←markdown, .xlsx←{sheets}, .pptx←{slides}. Instant, no key. "
-            "Spec shapes: doc_guide('build')."
+            ".docx←markdown, .xlsx←{sheets}, .pptx←{slides} + optional "
+            "`theme` (bg/accent colors, rail, page numbers → a DESIGNED deck "
+            "in one call, incl. stat/quote/comparison layouts). Instant, no "
+            "key. Spec shapes: doc_guide('build')."
         ),
         "input_schema": {
             "type": "object",

@@ -432,3 +432,77 @@ class TestLocalMcpServer:
         # FastMCP returns (content_blocks, raw_result)
         raw = result[1] if isinstance(result, tuple) else result
         assert "1" in str(raw) or "page_count" in str(raw)
+
+
+class TestThemedBuild:
+    """DocBuild theme support — a designed deck in ONE deterministic call.
+
+    Closes the gap where keyless agents had no fast path for design-spec
+    decks (navy/orange etc.) and fell back to python-pptx scripting or
+    20-minute raw-XML authoring."""
+
+    SPEC = {
+        "theme": {"bg": "0B1424", "accent": "#EA580C", "rail": True,
+                  "page_numbers": True},
+        "slides": [
+            {"layout": "title", "title": "제목", "subtitle": "발표자"},
+            {"layout": "stat", "title": "사용률", "value": "76%",
+             "label": "+32%p", "sublabel": "2025"},
+            {"layout": "comparison", "title": "두 미래",
+             "left": {"heading": "A", "bullets": ["줄1"]},
+             "right": {"heading": "B", "bullets": ["줄2"]}},
+            {"layout": "quote", "quote": "인용문", "attribution": "출처"},
+            {"layout": "content", "title": "행동", "bullets": ["하나", "둘"]},
+        ],
+    }
+
+    def _build(self, tmp_path):
+        out = tmp_path / "themed.pptx"
+        run_tool("build_doc", {"spec": self.SPEC, "output": str(out)})
+        return Presentation(str(out))
+
+    def test_theme_colors_and_chrome(self, tmp_path):
+        prs = self._build(tmp_path)
+        assert len(prs.slides) == 5
+        # 16:9 widescreen
+        assert abs(prs.slide_width / prs.slide_height - 16 / 9) < 0.01
+        s1 = list(prs.slides[0].shapes)
+        assert str(s1[0].fill.fore_color.rgb) == "0B1424"  # bg
+        rail = [sh for sh in s1 if sh.height == prs.slide_height and sh.width < 200000]
+        assert rail and str(rail[0].fill.fore_color.rgb) == "EA580C"
+
+    def test_page_numbers_skip_cover(self, tmp_path):
+        prs = self._build(tmp_path)
+        def texts(i):
+            return [sh.text_frame.text for sh in prs.slides[i].shapes
+                    if sh.has_text_frame]
+        assert not any("/" in t and "01" in t for t in texts(0))  # cover: none
+        assert any(t.strip() == "02 / 05" for t in texts(1))
+
+    def test_stat_value_is_accent(self, tmp_path):
+        prs = self._build(tmp_path)
+        for sh in prs.slides[1].shapes:
+            if sh.has_text_frame and "76%" in sh.text_frame.text:
+                run = sh.text_frame.paragraphs[0].runs[0]
+                assert str(run.font.color.rgb) == "EA580C"
+                assert run.font.size.pt == 88
+                return
+        raise AssertionError("stat value not found")
+
+    def test_comparison_two_panels(self, tmp_path):
+        prs = self._build(tmp_path)
+        fills = []
+        for sh in prs.slides[2].shapes:
+            try:
+                fills.append(str(sh.fill.fore_color.rgb))
+            except Exception:
+                pass
+        assert fills.count("132339") == 2  # default panel color
+
+    def test_no_theme_keeps_legacy_layouts(self, tmp_path):
+        out = tmp_path / "plain.pptx"
+        run_tool("build_doc", {"spec": {"slides": [
+            {"layout": "title", "title": "T", "subtitle": "S"}]},
+            "output": str(out)})
+        prs = Presentation(str(out))
+        assert prs.slides[0].shapes.title.text == "T"  # placeholder path

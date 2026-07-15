@@ -73,13 +73,25 @@ OUTPUT extension picks the engine and the required spec shape:
   - / 1. lists, **bold** / *italic*, | tables |, ``` code blocks.
 .xlsx ← spec is {"sheets": [{"name", "headers": [...], "rows": [[...]]}]}
   (styled header row, frozen panes, auto column widths).
-.pptx ← spec is {"slides": [{"layout", "title", "subtitle"|"bullets", "notes"}]}
-  layout ∈ title|content|section|title_only|two_content|blank (default
-  content); bullets: ["str", {"text": ..., "level": 0-8}].
+.pptx ← spec is {"slides": [...], "theme": {...}?}
+  layout ∈ title|content|section|title_only|blank plus DESIGN layouts:
+    stat        {"title","value","label"?,"sublabel"?}   — big accent number
+    quote       {"quote","attribution"?}                 — pull-quote
+    comparison  {"title","left":{"heading","bullets"},"right":{...}} — 2 panels
+  bullets: ["str", {"text": ..., "level": 0-8}].
+
+THEMED DECKS (deterministic design — no LLM): add
+  "theme": {"bg":"0B1424","accent":"EA580C","ink":"F4F6FB","muted":"94A1B8",
+            "panel":"132339","rail":true,"page_numbers":true,"font":"Noto Sans KR"?}
+→ 16:9 slides with background fill, left accent rail, NN/NN page numbers,
+type hierarchy, panels — a designed deck (e.g. deep-navy + orange) in ONE
+call. All theme keys optional (shown values are the defaults). Without
+"theme" the legacy built-in template layouts are used.
 
 Returns {path, page_count}. A spec that doesn't match the extension raises a
-bilingual ValueError — fix the shape and retry. pptx uses standard built-in
-layouts; for DESIGNED slides (theme/layout intelligence) use generate_doc.""",
+bilingual ValueError — fix the shape and retry. Use build_doc + theme for
+design-spec decks; generate_doc (LLM) only when you want the model to invent
+the content AND layout for you.""",
     "generate": """\
 generate_doc(intent, output, sources?, template?, deck_mode?, pages?, lang?)
 — LLM pipeline (needs an Anthropic key). Output extension picks the engine:
