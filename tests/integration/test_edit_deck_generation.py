@@ -370,12 +370,67 @@ class TestSlideRenderRetry:
         # Slide editor called twice: 1 failed render + 1 successful retry.
         assert llm.slide_calls == 2
         # The retry prompt carried the exact converter error back to the model.
-        assert "FAILED TO RENDER" in llm.slide_users[1]
+        assert "PREVIOUS SLIDE FAILED" in llm.slide_users[1]
         assert "base64" in llm.slide_users[1]
         # No render-failure warning, and the edit landed.
         assert not any(w.code == "edit_slide_render_failed" for w in resp.warnings)
         texts = _texts(resp.pptx, tmp_path)
         assert any("채팅으로 편집된" in t for t in texts)
+
+    @pytest.mark.asyncio
+    async def test_truncated_output_retried_with_placeholder_directive(
+        self, monkeypatch, tmp_path
+    ):
+        """A response cut off at the token limit (stop_reason=max_tokens,
+        surfacing as an 'unclosed token' parse error) is retried with the
+        keep-the-placeholder directive, then succeeds."""
+
+        @dataclass
+        class _TruncatingLLM:
+            plan: str
+            slide_calls: int = 0
+            slide_users: list = field(default_factory=list)
+
+            async def complete(self, system_prompt, user_message, **kwargs):
+                if "Deck Edit Planner" in system_prompt:
+                    return LLMResult(
+                        text=self.plan,
+                        usage=LLMUsage(input_tokens=10, output_tokens=10),
+                        model="stub",
+                        stop_reason="end_turn",
+                    )
+                self.slide_calls += 1
+                self.slide_users.append(user_message)
+                if self.slide_calls == 1:
+                    # Truncated mid-tag + reported as a token-limit cutoff.
+                    return LLMResult(
+                        text='```svg\n<svg xmlns="http://www.w3.org/2000/svg" '
+                        'viewBox="0 0 1280 720"><text x="10" y="10">hi</text',
+                        usage=LLMUsage(input_tokens=10, output_tokens=10),
+                        model="stub",
+                        stop_reason="max_tokens",
+                    )
+                return LLMResult(
+                    text=f"```svg\n{NEW_SVG}\n```",
+                    usage=LLMUsage(input_tokens=10, output_tokens=10),
+                    model="stub",
+                    stop_reason="end_turn",
+                )
+
+        llm = _TruncatingLLM(plan=PLAN_SINGLE_EDIT)
+        import sys
+
+        ed = sys.modules["edit2docs.tools.edit_deck"]
+        monkeypatch.setattr(ed, "AnthropicClient", lambda **kw: llm)
+
+        resp = await edit_deck(_request(_host_pptx_bytes(tmp_path)))
+
+        assert resp.changed is True
+        assert llm.slide_calls == 2
+        # The retry told the model its output was cut off and to keep the token.
+        assert "CUT OFF" in llm.slide_users[1]
+        assert "verbatim" in llm.slide_users[1]
+        assert not any(w.code == "edit_slide_render_failed" for w in resp.warnings)
 
     @pytest.mark.asyncio
     async def test_persistent_bad_render_keeps_original_no_crash(

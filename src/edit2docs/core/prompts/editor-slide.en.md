@@ -6,6 +6,19 @@ SVG is converted 1:1 into native PowerPoint shapes (`<rect>`/`<circle>`/
 clean, flat SVG — no scripts, no CSS classes, no external URLs, no
 `<foreignObject>`.
 
+## ⚠ CRITICAL: never write image data
+
+Images in the SVG appear ONLY as short placeholder tokens, e.g.
+`<image ... href="asset:IMG_1"/>`. The real picture is stored separately and
+re-attached for you after conversion. You MUST:
+
+- Copy every `href="asset:IMG_n"` **verbatim**. Keep the exact token.
+- **NEVER** write a `data:` URI or any base64 image data. Not even a little.
+
+Writing out base64 image data makes your response overrun the length limit and
+get **cut off mid-tag**, which fails the whole slide. Keeping the tiny
+`asset:IMG_n` token keeps your output short and correct.
+
 ## Contract
 
 - You receive the CURRENT slide SVG (for edits) or a style-reference SVG of a

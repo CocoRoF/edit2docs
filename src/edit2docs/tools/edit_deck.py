@@ -291,17 +291,22 @@ async def edit_deck(
             r = await client.complete(
                 system_prompt=slide_system,
                 user_message=base_user_message + repair_brief,
-                max_output_tokens=16384,
+                max_output_tokens=_SLIDE_MAX_TOKENS,
                 cache_system=True,
                 model=req.model,
             )
             nonlocal cost
             cost = _merge_cost(cost, _cost_from_usage(r.usage))
+            truncated = getattr(r, "stop_reason", None) == "max_tokens"
 
             svg = _extract_svg_block(r.text)
             if svg is None:
-                last_error = "The response contained no <svg> block."
-                repair_brief = _slide_retry_directive(last_error)
+                last_error = (
+                    "The response was truncated before a complete <svg> was "
+                    "produced." if truncated
+                    else "The response contained no <svg> block."
+                )
+                repair_brief = _slide_retry_directive(last_error, truncated=truncated)
                 continue
 
             svg = _restore_images(svg, image_map)
@@ -323,7 +328,12 @@ async def edit_deck(
                     ),
                 )
                 return op, candidate
-            repair_brief = _slide_retry_directive(last_error)
+            # An "unclosed token" parse error is the fingerprint of a truncated
+            # SVG even when the response didn't report max_tokens.
+            repair_brief = _slide_retry_directive(
+                last_error,
+                truncated=truncated or "unclosed" in (last_error or "").lower(),
+            )
 
         # Exhausted retries — keep the original slide (edit) / skip (add) rather
         # than fail the whole deck, and record why.
@@ -780,6 +790,13 @@ _DATA_URI = re.compile(r"(href=[\"'])(data:[^\"']+)([\"'])")
 #: can self-correct (e.g. a truncated base64 image) instead of failing the deck.
 _MAX_SLIDE_ATTEMPTS = 3
 
+#: Output-token budget for a single slide's SVG. Image data URIs are stubbed to
+#: short ``asset:IMG_n`` tokens before the model ever sees them, so a slide's
+#: SVG is small — UNLESS the model disobeys and writes raw base64 back out,
+#: which overruns the budget and truncates the SVG mid-tag ("unclosed token").
+#: A generous budget gives headroom so a well-behaved slide never truncates.
+_SLIDE_MAX_TOKENS = 32000
+
 
 def _try_convert_svg(svg: str) -> str | None:
     """Dry-run the SVG→PPTX conversion for one slide.
@@ -803,18 +820,34 @@ def _try_convert_svg(svg: str) -> str | None:
         return str(exc)
 
 
-def _slide_retry_directive(error: str) -> str:
-    """Feed a converter error back to the slide editor as a repair brief."""
-    return (
-        "\n\n# ⚠ YOUR PREVIOUS SLIDE FAILED TO RENDER — FIX IT AND RESEND\n"
-        "The SVG you produced could not be converted to PowerPoint. The exact "
-        f"error was:\n\n    {error}\n\n"
+def _slide_retry_directive(error: str, *, truncated: bool = False) -> str:
+    """Feed a converter error back to the slide editor as a repair brief.
+
+    When the previous response was *truncated* (cut off at the output-token
+    limit, which shows up as ``stop_reason=max_tokens`` or an "unclosed token"
+    parse error), the fix is almost always that the model expanded an image
+    placeholder into raw base64 — so the directive targets that directly.
+    """
+    head = (
+        "\n\n# ⚠ YOUR PREVIOUS SLIDE FAILED — FIX IT AND RESEND\n"
+        "The SVG you produced could not be turned into a PowerPoint slide. "
+        f"The exact error was:\n\n    {error}\n\n"
+    )
+    if truncated:
+        return head + (
+            "Your response was CUT OFF because it grew too long — this happens "
+            "when you write out raw image data instead of keeping the short "
+            "placeholder. You MUST keep every image as its placeholder token "
+            "(asset:IMG_1, asset:IMG_2, …) EXACTLY as given — copy it verbatim. "
+            "NEVER write a `data:` URI or base64 image data. Then output the "
+            "COMPLETE slide SVG inside a ```svg fence, fully closed."
+        )
+    return head + (
         "Output the COMPLETE corrected slide SVG again inside a ```svg fence. "
-        "If the error mentions base64 or an <image>: do NOT write raw base64 "
-        "image data yourself — keep every image placeholder token "
-        "(asset:IMG_1, asset:IMG_2, …) EXACTLY as it appears in the source "
-        "slide, or remove that <image> element entirely. Never truncate or "
-        "invent image data, and never leave an attribute value cut off."
+        "Keep every image placeholder token (asset:IMG_1, asset:IMG_2, …) "
+        "EXACTLY as it appears, or remove that <image> element entirely. Never "
+        "write raw base64 image data, and never leave a tag or attribute "
+        "unclosed."
     )
 
 
