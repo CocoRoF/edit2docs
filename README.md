@@ -330,6 +330,7 @@ uv venv .venv && uv pip install -e ".[server,dev]"
 
 | version | highlights |
 |---|---|
+| **v0.16.2** | **actionable preview errors** — when a `.pptx` isn't a real OOXML zip, `render_preview` now names the cause instead of "not a zip file": legacy binary `.ppt` (OLE/CFB magic → "re-save as .pptx"), HTML/error pages, empty uploads, or other non-zip payloads. Bilingual (ko + en) |
 | **v0.16.1** | hosted service: **`GET /v1/models`** — live model list for the studio picker (proxies the Anthropic Models API with the caller's BYOK key, newest first; curated fallback when no key). Powers the web studio's API-key-first model selector |
 | **v0.16.0** | **extension-scoped tools** — `tool_specs(extension="xlsx")` and `doc_guide(fmt=...)` return only the verbs (and topic/description detail) relevant to a file's format, backed by a `tool_matrix` capability table (SSOT). Opt-in: the unscoped default is unchanged. `arrange_doc` is hidden for `.docx`; `set_doc_text`/`arrange_doc`/`build_doc` descriptions specialize per format |
 | **v0.15.1** | ships the full **`arrange_doc`** implementation (0.15.0 tagged only the version bump — the verb, engine and wiring were left out; use 0.15.1) |
