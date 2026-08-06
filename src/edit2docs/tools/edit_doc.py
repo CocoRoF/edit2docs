@@ -18,6 +18,12 @@ from pydantic import Field
 
 from ..config import resolve_model
 from ..documents.docx_engine import DocxEdit, apply_docx_edits, docx_outline
+from ..documents.pptx_engine import (
+    VALID_PPTX_ACTIONS,
+    PptxEdit,
+    apply_pptx_edits,
+    pptx_outline,
+)
 from ..documents.xlsx_engine import XlsxEdit, apply_xlsx_edits, xlsx_outline
 from ..llm import DEFAULT_MODEL, AnthropicClient, build_output_lang_directive, load_prompt
 from ._edit_events import op_event_vars, op_summary, plan_event_vars
@@ -33,9 +39,13 @@ from .types import (
     WarningEntry,
 )
 
-DocFormat = Literal["docx", "xlsx"]
+DocFormat = Literal["docx", "xlsx", "pptx"]
 
-_PLANNER_ROLE = {"docx": "doc-editor-planner", "xlsx": "sheet-editor-planner"}
+_PLANNER_ROLE = {
+    "docx": "doc-editor-planner",
+    "xlsx": "sheet-editor-planner",
+    "pptx": "pptx-editor-planner",
+}
 _MAX_OPERATIONS = 30
 
 # Retry reminder for a plan-missing first response. Passed as the LLM call's
@@ -81,6 +91,15 @@ class EditDocResponse(ToolResponse):
     operations: list[dict] = Field(default_factory=list)
     cost: CostBreakdown
     warnings: list[WarningEntry] = Field(default_factory=list)
+    # PPTX only: the surgical planner judged this turn needs the SVG
+    # redesign/generation path (creating new slides or a full visual
+    # redesign that can't be expressed as targeted text/table/chart edits).
+    # The executor falls back to tools.edit_deck when this is set.
+    needs_svg: bool = False
+
+
+#: PPTX planner sentinels that mean "hand this turn to the SVG generator".
+_PPTX_GENERATIVE_ACTIONS = {"redesign", "add_slide"}
 
 
 async def edit_document(
@@ -129,6 +148,25 @@ async def edit_document(
         reply, raw_ops, plan_missing = _parse_plan(retry.text, warnings, lang=req.lang)
         if plan_missing:
             reply = reply.rstrip() + reply_text("plan_failed", req.lang)
+
+    # PPTX: if the surgical planner decided the request needs new/redesigned
+    # slides (beyond targeted text/table/chart edits), signal the executor to
+    # hand the whole turn to the SVG generator (tools.edit_deck).
+    if req.fmt == "pptx" and any(
+        isinstance(o, dict) and o.get("action") in _PPTX_GENERATIVE_ACTIONS
+        for o in raw_ops
+    ):
+        await _emit(on_event, StageEvent(stage="done", progress=1.0, message_key="stages.done"))
+        return EditDocResponse(
+            content=req.content, changed=False, reply=reply, operations=[],
+            cost=CostBreakdown(
+                input_tokens=cost.input_tokens, output_tokens=cost.output_tokens,
+                cache_read_tokens=cost.cache_read_tokens,
+                cache_write_tokens=cost.cache_write_tokens,
+                duration_seconds=time.perf_counter() - started,
+            ),
+            warnings=warnings, needs_svg=True,
+        )
 
     if len(raw_ops) > _MAX_OPERATIONS:
         warnings.append(
@@ -203,6 +241,8 @@ async def edit_document(
 def _outline_context(req: EditDocRequest, warnings: list[WarningEntry]) -> str:
     if req.fmt == "docx":
         return _docx_outline_context(req, warnings)
+    if req.fmt == "pptx":
+        return _pptx_outline_context(req)
 
     # xlsx is already sample-bounded (sample_rows caps the per-sheet body),
     # so its outline size is independent of the workbook's row count — no
@@ -217,6 +257,62 @@ def _outline_context(req: EditDocRequest, warnings: list[WarningEntry]) -> str:
                 "" if v is None else str(v) for v in row
             )
             lines.append(f"- row {r}: {rendered[:200]}")
+    return "\n".join(lines)
+
+
+def _pos_str(pos: dict | None) -> str:
+    """Compact geometry hint for a shape line (inches)."""
+    if not pos:
+        return ""
+    return (
+        f" @({pos['left']},{pos['top']} {pos['width']}x{pos['height']}in)"
+    )
+
+
+def _pptx_outline_context(req: EditDocRequest) -> str:
+    """Format the addressable slide model (documents/pptx_engine.pptx_outline)
+    into the exact address lines the pptx planner's ops resolve against."""
+    entries = pptx_outline(req.content)
+    lines = [
+        "# Deck outline (slide / shape / table / chart addresses)",
+        "# Edit in place — reference the shape/table/chart by the ids shown.",
+    ]
+    current_slide = None
+    for e in entries:
+        if e["slide"] != current_slide:
+            current_slide = e["slide"]
+            lines.append(f"## slide {current_slide}")
+        kind = e.get("kind")
+        if "table" in e and "row" in e:  # a table cell
+            lines.append(
+                f"  - table {e['table']} cell ({e['row']},{e['col']}): {e['text'][:100]}"
+            )
+        elif kind == "text":
+            name = f" \"{e['name']}\"" if e.get("name") else ""
+            pos = _pos_str(e.get("pos"))
+            lines.append(
+                f"- shape {e['shape']}{name} para {e['para']}{pos}: {e['text'][:140]}"
+            )
+        elif kind == "table":
+            lines.append(
+                f"- table {e['shape']} ({e['rows']}x{e['cols']} — edit cells by (row,col))"
+            )
+        elif kind == "chart":
+            ser = "; ".join(
+                f"{s['name']}=[{', '.join(str(v) for v in s['values'][:8])}]"
+                for s in (e.get("series") or [])[:4]
+            )
+            cats = ", ".join(
+                str(c) for c in ((e.get("series") or [{}])[0].get("categories") or [])[:8]
+            )
+            title = f" \"{e['title']}\"" if e.get("title") else ""
+            lines.append(
+                f"- chart {e['chart']} [{e.get('chart_type')}]{title}: "
+                f"categories=[{cats}] series: {ser}"
+            )
+        else:  # picture / group / diagram / other
+            name = f" \"{e['name']}\"" if e.get("name") else ""
+            lines.append(f"- shape {e['shape']} [{kind}]{name}{_pos_str(e.get('pos'))}")
     return "\n".join(lines)
 
 
@@ -398,6 +494,7 @@ def _build_user_message(req: EditDocRequest, outline: str) -> str:
 _VALID_ACTIONS = {
     "docx": ("replace", "insert_after", "delete"),
     "xlsx": ("set_cell", "append_rows", "add_sheet"),
+    "pptx": VALID_PPTX_ACTIONS,
 }
 
 
@@ -411,7 +508,41 @@ def _apply(
     """
     warnings: list[WarningEntry] = []
     valid_raw: list[dict] = []
-    if fmt == "docx":
+    if fmt == "pptx":
+        edits = []
+        for raw in raw_ops:
+            if not isinstance(raw, dict) or raw.get("action") not in VALID_PPTX_ACTIONS:
+                warnings.append(_skip_warning(raw))
+                continue
+            valid_raw.append(raw)
+            edits.append(
+                PptxEdit(
+                    action=raw["action"],
+                    slide=raw.get("slide"),
+                    shape=raw.get("shape"),
+                    para=raw.get("para", 0) or 0,
+                    row=raw.get("row"),
+                    col=raw.get("col"),
+                    at=raw.get("at"),
+                    chart=raw.get("chart"),
+                    new_text=str(raw["new_text"]) if raw.get("new_text") is not None else "",
+                    old_text=raw.get("old_text"),
+                    title=raw.get("title"),
+                    categories=raw.get("categories"),
+                    series=raw.get("series"),
+                    color=raw.get("color"),
+                    size_pt=raw.get("size_pt"),
+                    bold=raw.get("bold"),
+                    italic=raw.get("italic"),
+                    fill=raw.get("fill"),
+                    left=raw.get("left"),
+                    top=raw.get("top"),
+                    width=raw.get("width"),
+                    height=raw.get("height"),
+                )
+            )
+        new_content, results = apply_pptx_edits(content, edits)
+    elif fmt == "docx":
         edits = []
         for raw in raw_ops:
             if not isinstance(raw, dict) or raw.get("action") not in (

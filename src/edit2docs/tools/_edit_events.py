@@ -38,9 +38,57 @@ def _is_ko(lang: str) -> bool:
 def _pptx_target(op: dict, lang: str) -> tuple[dict, str]:
     action = op.get("action")
     ko = _is_ko(lang)
+    n = op.get("slide")
+
+    # -- surgical structural ops (documents/pptx_engine) --------------------
+    if action == "set_text":
+        shape = op.get("shape")
+        label = f"{n}번 슬라이드 텍스트 편집" if ko else f"Edit text on slide {n}"
+        return {"kind": "shape", "slide": n, "shape": shape}, label
+    if action == "set_table_cell" or action == "set_cell_style":
+        shape, r, c = op.get("shape"), op.get("row"), op.get("col")
+        if action == "set_cell_style":
+            label = (
+                f"{n}번 슬라이드 표 셀({r},{c}) 서식" if ko
+                else f"Style table cell ({r},{c}) on slide {n}"
+            )
+        else:
+            label = (
+                f"{n}번 슬라이드 표 셀({r},{c}) 편집" if ko
+                else f"Edit table cell ({r},{c}) on slide {n}"
+            )
+        return {"kind": "table_cell", "slide": n, "shape": shape, "row": r, "col": c}, label
+    if action == "set_shape_style":
+        shape = op.get("shape")
+        label = f"{n}번 슬라이드 서식 변경" if ko else f"Restyle a shape on slide {n}"
+        return {"kind": "shape", "slide": n, "shape": shape}, label
+    if action == "set_shape_position":
+        shape = op.get("shape")
+        label = f"{n}번 슬라이드 요소 이동" if ko else f"Move a shape on slide {n}"
+        return {"kind": "shape", "slide": n, "shape": shape}, label
+    if action == "insert_row":
+        shape = op.get("shape")
+        label = f"{n}번 슬라이드 표에 행 추가" if ko else f"Add a table row on slide {n}"
+        return {"kind": "table", "slide": n, "shape": shape}, label
+    if action == "delete_row":
+        shape, r = op.get("shape"), op.get("row")
+        label = f"{n}번 슬라이드 표 {r}행 삭제" if ko else f"Delete table row {r} on slide {n}"
+        return {"kind": "table", "slide": n, "shape": shape}, label
+    if action == "set_chart_data":
+        chart = op.get("chart")
+        label = f"{n}번 슬라이드 차트 데이터 수정" if ko else f"Update chart data on slide {n}"
+        return {"kind": "chart", "slide": n, "chart": chart}, label
+    if action == "set_chart_title":
+        chart = op.get("chart")
+        label = f"{n}번 슬라이드 차트 제목 수정" if ko else f"Update chart title on slide {n}"
+        return {"kind": "chart", "slide": n, "chart": chart}, label
+
+    # -- slide-level ops (SVG editor + redesign fallback) ------------------
     if action == "edit":
-        n = op.get("slide")
         label = f"{n}번 슬라이드 편집" if ko else f"Edit slide {n}"
+        return {"kind": "slide", "slide": n}, label
+    if action == "redesign":
+        label = f"{n}번 슬라이드 재구성" if ko else f"Redesign slide {n}"
         return {"kind": "slide", "slide": n}, label
     if action == "add":
         after = op.get("after", 0)
@@ -50,7 +98,6 @@ def _pptx_target(op: dict, lang: str) -> tuple[dict, str]:
             label = f"{after}번 뒤 새 슬라이드 추가" if ko else f"Add a new slide after {after}"
         return {"kind": "slide_after", "after": after}, label
     if action == "delete":
-        n = op.get("slide")
         label = f"{n}번 슬라이드 삭제" if ko else f"Delete slide {n}"
         return {"kind": "slide", "slide": n}, label
     return {"kind": "unknown"}, action or ("작업" if ko else "operation")

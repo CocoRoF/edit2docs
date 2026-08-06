@@ -96,7 +96,35 @@ async def run_edit_deck(ctx: ExecutionContext) -> None:
         if isinstance(t, dict) and t.get("role") in ("user", "assistant")
     ]
 
-    if fmt == "pptx":
+    # All formats go through the surgical, byte-preserving editor first
+    # (documents/*_engine via tools.edit_doc). For PPTX this edits real
+    # shapes/tables/charts in place — tables and charts stay editable and
+    # every untouched element (headers, theme, native objects) is preserved.
+    # Only when the PPTX planner judges the turn needs a NEW or fully
+    # redesigned slide (needs_svg) do we fall back to the SVG generator.
+    import asyncio as _asyncio
+
+    from ...tools.convert import convert_to_markdown
+    from ...tools.edit_doc import EditDocRequest, edit_document
+
+    converted = await _asyncio.gather(
+        *(_asyncio.to_thread(convert_to_markdown, r) for r in convert_reqs)
+    )
+    sources_markdown = [c.markdown for c in converted]
+    resp = await edit_document(
+        EditDocRequest(
+            content=pptx_bytes,
+            fmt=fmt,  # type: ignore[arg-type]
+            instruction=instruction,
+            sources_markdown=sources_markdown,
+            chat_history=turns,
+            lang=lang,  # type: ignore[arg-type]
+            model=model,
+            anthropic_api_key=anthropic_api_key,
+        ),
+        on_event=on_event,
+    )
+    if fmt == "pptx" and getattr(resp, "needs_svg", False):
         resp = await edit_deck(
             EditDeckRequest(
                 pptx=pptx_bytes,
@@ -111,31 +139,6 @@ async def run_edit_deck(ctx: ExecutionContext) -> None:
         )
         new_content = resp.pptx
     else:
-        # DOCX / XLSX: one planner call + deterministic apply. The tool has
-        # no event stream of its own, so emit the stages around it.
-        # edit_document now streams its own plan/op/done stage events.
-        from ...tools.convert import convert_to_markdown
-        from ...tools.edit_doc import EditDocRequest, edit_document
-
-        import asyncio as _asyncio
-
-        converted = await _asyncio.gather(
-            *(_asyncio.to_thread(convert_to_markdown, r) for r in convert_reqs)
-        )
-        sources_markdown = [c.markdown for c in converted]
-        resp = await edit_document(
-            EditDocRequest(
-                content=pptx_bytes,
-                fmt=fmt,  # type: ignore[arg-type]
-                instruction=instruction,
-                sources_markdown=sources_markdown,
-                chat_history=turns,
-                lang=lang,  # type: ignore[arg-type]
-                model=model,
-                anthropic_api_key=anthropic_api_key,
-            ),
-            on_event=on_event,
-        )
         new_content = resp.content
 
     result: dict[str, Any] = {
