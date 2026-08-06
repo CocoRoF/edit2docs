@@ -66,6 +66,34 @@ def _pptx_target(op: dict, lang: str) -> tuple[dict, str]:
         shape = op.get("shape")
         label = f"{n}번 슬라이드 요소 이동" if ko else f"Move a shape on slide {n}"
         return {"kind": "shape", "slide": n, "shape": shape}, label
+    if action == "set_runs":
+        shape = op.get("shape")
+        label = f"{n}번 슬라이드 서식 텍스트 편집" if ko else f"Edit rich text on slide {n}"
+        return {"kind": "shape", "slide": n, "shape": shape}, label
+    if action == "add_textbox":
+        label = f"{n}번 슬라이드에 텍스트 상자 추가" if ko else f"Add a text box on slide {n}"
+        return {"kind": "slide", "slide": n}, label
+    if action == "delete_shape":
+        shape = op.get("shape")
+        label = f"{n}번 슬라이드 요소 삭제" if ko else f"Delete a shape on slide {n}"
+        return {"kind": "shape", "slide": n, "shape": shape}, label
+    if action == "duplicate_shape":
+        shape = op.get("shape")
+        label = f"{n}번 슬라이드 요소 복제" if ko else f"Duplicate a shape on slide {n}"
+        return {"kind": "shape", "slide": n, "shape": shape}, label
+    if action in ("insert_column", "delete_column"):
+        shape = op.get("shape")
+        verb_ko = "추가" if action == "insert_column" else "삭제"
+        verb_en = "Add" if action == "insert_column" else "Delete"
+        label = (
+            f"{n}번 슬라이드 표 열 {verb_ko}" if ko
+            else f"{verb_en} table column on slide {n}"
+        )
+        return {"kind": "table", "slide": n, "shape": shape}, label
+    if action == "merge_cells":
+        shape = op.get("shape")
+        label = f"{n}번 슬라이드 표 셀 병합" if ko else f"Merge table cells on slide {n}"
+        return {"kind": "table", "slide": n, "shape": shape}, label
     if action == "insert_row":
         shape = op.get("shape")
         label = f"{n}번 슬라이드 표에 행 추가" if ko else f"Add a table row on slide {n}"

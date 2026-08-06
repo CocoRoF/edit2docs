@@ -25,6 +25,7 @@ Addressing (all indices as shown in :func:`pptx_outline`):
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -33,22 +34,112 @@ __all__ = [
     "PptxEditResult",
     "pptx_outline",
     "apply_pptx_edits",
+    "find_shapes",
+    "describe_ops",
+    "OP_CATALOG",
     "VALID_PPTX_ACTIONS",
 ]
 
-#: Every action the surgical engine understands. The planner is constrained to
-#: this set; anything else is reported ``invalid`` rather than applied.
-VALID_PPTX_ACTIONS = (
-    "set_text",          # replace paragraph `para` of shape `shape`
-    "set_shape_style",   # restyle shape text (color/size/bold/italic) + fill
-    "set_shape_position",  # move/resize shape `shape` (inches)
-    "set_table_cell",    # replace cell (row,col) of table shape `shape`
-    "set_cell_style",    # restyle cell (row,col): fill / font
-    "insert_row",        # insert a row into table shape `shape` at `at`
-    "delete_row",        # delete row `row` of table shape `shape`
-    "set_chart_data",    # rewrite chart `chart`'s categories + series
-    "set_chart_title",   # rewrite chart `chart`'s title
-)
+#: Self-describing operation catalog — the SINGLE SOURCE OF TRUTH for the
+#: surgical PPTX interface. Each entry documents the action's address + payload
+#: contract; validation, the planner prompt's op reference, and any external
+#: tool schema are all derived from this (see :func:`describe_ops`). Keeping the
+#: contract in one machine-readable place is what makes the framework
+#: discoverable and drift-free.
+OP_CATALOG: dict[str, dict] = {
+    "set_text": {
+        "summary": "Replace one paragraph's text in a text shape (in place).",
+        "address": ["slide", "shape", "para?"],
+        "payload": ["new_text", "old_text?"],
+    },
+    "set_shape_style": {
+        "summary": "Restyle a text shape's font (color/size/bold/italic) and/or fill.",
+        "address": ["slide", "shape", "para?"],
+        "payload": ["color?", "size_pt?", "bold?", "italic?", "fill?"],
+    },
+    "set_shape_position": {
+        "summary": "Move/resize a shape (inches).",
+        "address": ["slide", "shape"],
+        "payload": ["left?", "top?", "width?", "height?"],
+    },
+    "set_table_cell": {
+        "summary": "Replace a table cell's text.",
+        "address": ["slide", "shape", "row", "col"],
+        "payload": ["new_text", "old_text?"],
+    },
+    "set_cell_style": {
+        "summary": "Restyle a table cell (fill / font).",
+        "address": ["slide", "shape", "row", "col"],
+        "payload": ["fill?", "color?", "size_pt?", "bold?", "italic?"],
+    },
+    "insert_row": {
+        "summary": "Insert a row into a table (clones the row above as template).",
+        "address": ["slide", "shape"],
+        "payload": ["at?"],
+    },
+    "delete_row": {
+        "summary": "Delete a table row.",
+        "address": ["slide", "shape", "row"],
+        "payload": [],
+    },
+    "set_chart_data": {
+        "summary": "Rewrite a chart's categories + series (classic charts).",
+        "address": ["slide", "chart"],
+        "payload": ["categories", "series"],
+    },
+    "set_chart_title": {
+        "summary": "Set a chart's title.",
+        "address": ["slide", "chart"],
+        "payload": ["title"],
+    },
+    "add_textbox": {
+        "summary": "Add a new text box at a position (inches) with text.",
+        "address": ["slide"],
+        "payload": ["new_text", "left", "top", "width", "height",
+                    "color?", "size_pt?", "bold?", "italic?"],
+    },
+    "delete_shape": {
+        "summary": "Delete a shape from a slide.",
+        "address": ["slide", "shape"],
+        "payload": [],
+    },
+    "duplicate_shape": {
+        "summary": "Duplicate a shape (optionally offset by dx/dy inches).",
+        "address": ["slide", "shape"],
+        "payload": ["left?", "top?"],  # optional absolute position for the copy
+    },
+    "set_runs": {
+        "summary": "Replace a paragraph with multiple independently-styled runs "
+                   "(e.g. bold just one word).",
+        "address": ["slide", "shape", "para?"],
+        "payload": ["runs"],  # [{text, bold?, italic?, color?, size_pt?}, ...]
+    },
+    "insert_column": {
+        "summary": "Insert a column into a table (clones the column to its left).",
+        "address": ["slide", "shape"],
+        "payload": ["at?"],
+    },
+    "delete_column": {
+        "summary": "Delete a table column.",
+        "address": ["slide", "shape", "col"],
+        "payload": [],
+    },
+    "merge_cells": {
+        "summary": "Merge a rectangular block of table cells.",
+        "address": ["slide", "shape", "row", "col"],
+        "payload": ["row2", "col2"],  # bottom-right of the block
+    },
+}
+
+#: Every action the surgical engine understands (derived from the catalog).
+VALID_PPTX_ACTIONS = tuple(OP_CATALOG)
+
+
+def describe_ops() -> dict[str, dict]:
+    """The machine-readable op catalog — lets any agent introspect exactly which
+    surgical operations exist and each one's address + payload contract."""
+    return {k: dict(v) for k, v in OP_CATALOG.items()}
+
 
 #: EMU per inch — the outline reports geometry in inches; ops accept inches.
 _EMU_PER_INCH = 914400
@@ -108,6 +199,11 @@ def pptx_outline(content: bytes) -> list[dict]:
             shapes = slide.shapes
         except Exception:
             shapes = []
+        # One walk for all text paragraphs (avoids O(shapes^2) get_paragraphs).
+        try:
+            para_map = slide.paragraphs_by_shape()
+        except Exception:
+            para_map = {}
         for info in shapes:
             if info.id in tables:
                 continue  # handled in the table pass below
@@ -115,10 +211,9 @@ def pptx_outline(content: bytes) -> list[dict]:
             if info.kind == "text":
                 # Per-a:p text (NOT text.split("\n")) so the para index the
                 # planner sees is the one set_text mutates, even with a literal
-                # newline inside a run.
-                try:
-                    paras = slide.get_paragraphs(info.id)
-                except Exception:
+                # newline inside a run — read from the single-walk map.
+                paras = para_map.get(info.id)
+                if paras is None:
                     paras = (info.text or "").split("\n")
                 emitted = False
                 for p_idx, para_text in enumerate(paras):
@@ -230,11 +325,16 @@ class PptxEdit:
     bold: bool | None = None
     italic: bool | None = None
     fill: str | None = None          # shape fill "RRGGBB"
-    # set_shape_position — inches
+    # set_shape_position / add_textbox — inches
     left: float | None = None
     top: float | None = None
     width: float | None = None
     height: float | None = None
+    # set_runs
+    runs: list | None = None         # [{text, bold?, italic?, color?, size_pt?}, ...]
+    # merge_cells — bottom-right of the block
+    row2: int | None = None
+    col2: int | None = None
 
 
 @dataclass
@@ -249,18 +349,34 @@ def _normalize(text: str) -> str:
 
 
 def _as_number(v):
-    """Coerce a chart value to float; None stays None (a gap in the series).
-    A non-numeric string raises ValueError → the op is reported ``invalid``."""
+    """Coerce a chart value to a FINITE float; None stays None (a gap in the
+    series). A non-numeric or non-finite value raises ValueError → the op is
+    reported ``invalid`` (never writes ``nan``/``inf`` into a numCache).
+
+    Only spaces and thousands separators around whole groups are stripped —
+    an ambiguous ``"1,5"`` (European decimal) is NOT silently turned into 15."""
+    import math
+
     if v is None:
         return None
     if isinstance(v, bool):
-        return float(v)
+        raise ValueError(f"chart value {v!r} is not numeric")
     if isinstance(v, (int, float)):
-        return float(v)
-    return float(str(v).replace(",", "").strip())
+        f = float(v)
+    else:
+        s = str(v).strip()
+        # Strip thousands separators only when unambiguous (3-digit groups).
+        if re.fullmatch(r"-?\d{1,3}(,\d{3})+(\.\d+)?", s):
+            s = s.replace(",", "")
+        f = float(s)
+    if not math.isfinite(f):
+        raise ValueError(f"chart value {v!r} is not finite")
+    return f
 
 
 def _safe_int(v, default: int = -1) -> int:
+    if isinstance(v, bool):  # bool is an int subclass — never a valid address
+        return default
     try:
         return int(v)
     except (TypeError, ValueError):
@@ -269,8 +385,9 @@ def _safe_int(v, default: int = -1) -> int:
 
 def _opt_int(v):
     """int(v) or None — keeps None as None; used to normalize address fields so
-    a string like '0' from any caller behaves like the int 0."""
-    if v is None:
+    a string like '0' from any caller behaves like the int 0. A bool is NOT a
+    valid address, so it maps to None (rejected downstream)."""
+    if v is None or isinstance(v, bool):
         return None
     try:
         return int(v)
@@ -289,13 +406,22 @@ def _row_sort_key(edit: PptxEdit) -> tuple:
     ``set_table_cell row=1`` deterministically populates the NEW row,
     regardless of the order the planner emitted them. All fields are coerced so
     a stray string address can never crash the sort."""
-    idx = edit.at if edit.at is not None else edit.row
-    structural = 1 if edit.action in ("insert_row", "delete_row") else 0
+    if edit.action in ("insert_column", "delete_column"):
+        idx = edit.at if edit.at is not None else edit.col
+    else:
+        idx = edit.at if edit.at is not None else edit.row
+    structural = 1 if edit.action in (
+        "insert_row", "delete_row", "insert_column", "delete_column"
+    ) else 0
     return (_safe_int(edit.slide), _safe_int(edit.shape), _safe_int(idx), structural)
 
 
 def apply_pptx_edits(
-    content: bytes, edits: Iterable[PptxEdit]
+    content: bytes,
+    edits: Iterable[PptxEdit],
+    *,
+    dry_run: bool = False,
+    atomic: bool = False,
 ) -> tuple[bytes, list[PptxEditResult]]:
     """Apply surgical edits losslessly via contextifier's raw layer.
 
@@ -303,6 +429,12 @@ def apply_pptx_edits(
     package stays byte-identical. Per-edit soft failures never abort the batch —
     each op yields an ``applied | stale | not_found | invalid | unsupported``
     result, reported in caller order.
+
+    * ``dry_run`` — run every op for real against an in-memory copy (so the
+      statuses are accurate), but return the ORIGINAL bytes: validate a plan
+      without changing the file.
+    * ``atomic`` — all-or-nothing: if any op is not ``applied``, ship nothing
+      (return the original bytes) so the deck is never left half-edited.
     """
     from contextifier import open_raw
 
@@ -316,14 +448,53 @@ def apply_pptx_edits(
     edit_list = list(edits)
     results: list[PptxEditResult | None] = [None] * len(edit_list)
 
-    # Row insert/delete shift row indices within one table; run them
-    # highest-row-first so each op's original address stays valid. Non-row ops
-    # are order-independent (shape id / chart ordinal don't shift).
+    # Row/column insert/delete shift indices within one table; run them
+    # highest-index-first so each op's original address stays valid. Non-shifting
+    # ops are order-independent (shape id / chart ordinal don't shift).
     ordered = sorted(enumerate(edit_list), key=lambda pair: _row_sort_key(pair[1]), reverse=True)
     for index, edit in ordered:
         results[index] = _apply_one(raw, edit)
 
-    return raw.to_bytes(), [r for r in results if r is not None]
+    final = [r for r in results if r is not None]
+    all_ok = all(r.status == "applied" for r in final)
+    # Dry run ships nothing; atomic ships nothing unless every op applied.
+    if dry_run or (atomic and not all_ok):
+        return content, final
+    return raw.to_bytes(), final
+
+
+def find_shapes(
+    content: bytes,
+    *,
+    text: str | None = None,
+    kind: str | None = None,
+    name: str | None = None,
+    slide: int | None = None,
+) -> list[dict]:
+    """Query the deck for shapes matching criteria — a selection interface so an
+    agent can target edits without eyeballing the whole outline.
+
+    Filters (all optional, ANDed): ``text`` (case-insensitive substring of the
+    shape's text), ``kind`` (text/table/chart/picture/…), ``name`` (substring of
+    the shape name), ``slide`` (1-based). Returns matching outline entries
+    (``slide``, ``shape``/``chart``, ``kind``, ``name``, ``text`` …).
+    """
+    tl = text.lower() if text else None
+    nl = name.lower() if name else None
+    out: list[dict] = []
+    for e in pptx_outline(content):
+        if slide is not None and e.get("slide") != slide:
+            continue
+        if kind is not None and e.get("kind") != kind:
+            continue
+        if nl is not None and nl not in (e.get("name") or "").lower():
+            continue
+        if tl is not None:
+            blob = (e.get("text") or e.get("title") or "").lower()
+            if tl not in blob:
+                continue
+        out.append(e)
+    return out
 
 
 def _slide_of(raw, edit: PptxEdit):
@@ -353,20 +524,32 @@ def _apply_one(raw, edit: PptxEdit) -> PptxEditResult:
     edit.col = _opt_int(edit.col)
     edit.at = _opt_int(edit.at)
     edit.chart = _opt_int(edit.chart)
+    edit.row2 = _opt_int(edit.row2)
+    edit.col2 = _opt_int(edit.col2)
 
     try:
         if edit.action == "set_text":
             return _apply_set_text(slide, edit)
+        if edit.action == "set_runs":
+            return _apply_set_runs(slide, edit)
         if edit.action == "set_shape_style":
             return _apply_set_shape_style(slide, edit)
         if edit.action == "set_shape_position":
             return _apply_set_shape_position(slide, edit)
+        if edit.action == "add_textbox":
+            return _apply_add_textbox(slide, edit)
+        if edit.action == "delete_shape":
+            return _apply_delete_shape(slide, edit)
+        if edit.action == "duplicate_shape":
+            return _apply_duplicate_shape(slide, edit)
         if edit.action == "set_table_cell":
             return _apply_set_table_cell(slide, edit)
         if edit.action == "set_cell_style":
             return _apply_set_cell_style(slide, edit)
-        if edit.action in ("insert_row", "delete_row"):
+        if edit.action in ("insert_row", "delete_row", "insert_column", "delete_column"):
             return _apply_row_op(slide, edit)
+        if edit.action == "merge_cells":
+            return _apply_merge_cells(slide, edit)
         if edit.action in ("set_chart_data", "set_chart_title"):
             return _apply_chart_op(slide, edit)
     except Exception as exc:  # last-resort: one bad op never kills the batch
@@ -392,6 +575,87 @@ def _apply_set_text(slide, edit: PptxEdit) -> PptxEditResult:
         slide.set_text(edit.shape, edit.new_text, para=para)
     except IndexError:
         return PptxEditResult(edit.action, "not_found", "paragraph index out of range")
+    return PptxEditResult(edit.action, "applied")
+
+
+def _apply_set_runs(slide, edit: PptxEdit) -> PptxEditResult:
+    if edit.shape is None:
+        return PptxEditResult(edit.action, "invalid", "set_runs needs a shape id")
+    if not edit.runs or not isinstance(edit.runs, list):
+        return PptxEditResult(edit.action, "invalid", "set_runs needs a non-empty runs list")
+    specs = []
+    for r in edit.runs:
+        if not isinstance(r, dict):
+            return PptxEditResult(edit.action, "invalid", "each run must be an object with text")
+        specs.append({
+            "text": str(r.get("text", "")),
+            "color": r.get("color"),
+            "size_pt": r.get("size_pt"),
+            "bold": r.get("bold"),
+            "italic": r.get("italic"),
+        })
+    try:
+        slide.set_runs(edit.shape, edit.para or 0, specs)
+    except KeyError:
+        return PptxEditResult(edit.action, "not_found", "no shape with that id")
+    except IndexError:
+        return PptxEditResult(edit.action, "not_found", "paragraph index out of range")
+    except ValueError:
+        return PptxEditResult(edit.action, "invalid", "shape has no editable text")
+    return PptxEditResult(edit.action, "applied")
+
+
+def _apply_add_textbox(slide, edit: PptxEdit) -> PptxEditResult:
+    for f in ("left", "top", "width", "height"):
+        if getattr(edit, f) is None:
+            return PptxEditResult(edit.action, "invalid", f"add_textbox needs {f} (inches)")
+
+    def _emu(v):
+        return int(round(v * _EMU_PER_INCH))
+
+    slide.add_textbox(
+        edit.new_text,
+        left=_emu(edit.left), top=_emu(edit.top),
+        width=_emu(edit.width), height=_emu(edit.height),
+        color=edit.color, size_pt=edit.size_pt, bold=edit.bold, italic=edit.italic,
+    )
+    return PptxEditResult(edit.action, "applied")
+
+
+def _apply_delete_shape(slide, edit: PptxEdit) -> PptxEditResult:
+    if edit.shape is None:
+        return PptxEditResult(edit.action, "invalid", "delete_shape needs a shape id")
+    try:
+        slide.delete_shape(edit.shape)
+    except KeyError:
+        return PptxEditResult(edit.action, "not_found", "no shape with that id")
+    return PptxEditResult(edit.action, "applied")
+
+
+def _apply_duplicate_shape(slide, edit: PptxEdit) -> PptxEditResult:
+    if edit.shape is None:
+        return PptxEditResult(edit.action, "invalid", "duplicate_shape needs a shape id")
+
+    def _emu(v):
+        return int(round(v * _EMU_PER_INCH)) if v is not None else None
+
+    try:
+        slide.duplicate_shape(edit.shape, left=_emu(edit.left), top=_emu(edit.top))
+    except KeyError:
+        return PptxEditResult(edit.action, "not_found", "no shape with that id")
+    return PptxEditResult(edit.action, "applied")
+
+
+def _apply_merge_cells(slide, edit: PptxEdit) -> PptxEditResult:
+    table = _table_by_shape(slide, edit.shape)
+    if table is None:
+        return PptxEditResult(edit.action, "not_found", "no table with that shape id")
+    if None in (edit.row, edit.col, edit.row2, edit.col2):
+        return PptxEditResult(edit.action, "invalid", "merge_cells needs row,col,row2,col2")
+    try:
+        table.merge_cells(edit.row, edit.col, edit.row2, edit.col2)
+    except IndexError as exc:
+        return PptxEditResult(edit.action, "not_found", str(exc))
     return PptxEditResult(edit.action, "applied")
 
 
@@ -507,12 +771,17 @@ def _apply_row_op(slide, edit: PptxEdit) -> PptxEditResult:
         return PptxEditResult(edit.action, "not_found", "no table with that shape id")
     try:
         if edit.action == "insert_row":
-            at = edit.at if edit.at is not None else table.n_rows
-            table.insert_row(at)
-        else:  # delete_row
+            table.insert_row(edit.at if edit.at is not None else table.n_rows)
+        elif edit.action == "delete_row":
             if edit.row is None:
                 return PptxEditResult(edit.action, "invalid", "delete_row needs row")
             table.delete_row(edit.row)
+        elif edit.action == "insert_column":
+            table.insert_column(edit.at if edit.at is not None else table.n_cols)
+        else:  # delete_column
+            if edit.col is None:
+                return PptxEditResult(edit.action, "invalid", "delete_column needs col")
+            table.delete_column(edit.col)
     except (IndexError, ValueError) as exc:
         return PptxEditResult(edit.action, "not_found", str(exc))
     return PptxEditResult(edit.action, "applied")
@@ -543,7 +812,8 @@ def _apply_chart_op(slide, edit: PptxEdit) -> PptxEditResult:
                 )
                 series.append((name, [_as_number(v) for v in values]))
             chart.set_data(
-                categories=[str(c) for c in edit.categories], series=series
+                categories=["" if c is None else str(c) for c in edit.categories],
+                series=series,
             )
     except RawUnsupportedError as exc:
         return PptxEditResult(edit.action, "unsupported", str(exc))

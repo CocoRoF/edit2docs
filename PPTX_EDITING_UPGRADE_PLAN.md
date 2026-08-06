@@ -145,6 +145,27 @@ contextifier raw 레이어에 **이미 존재하지만 PPTX 도구로 미배선*
 
 **배포 순서(검토·승인 후)**: contextifier 릴리스(신규 raw 메서드 의존) → edit2docs main 머지 → hr-web no-cache 재빌드(edit2docs-server + web).
 
+## ✅ 2차 강화 (2026-08-06) — 프레임워크 인터페이스 + author-in-place
+
+두 서브에이전트(적대적 재검토 + 격차분석) 결과를 반영해 **정확성 하드닝 + 강력한 프레임워크 인터페이스 + 저작 능력 확장**을 완료.
+
+**정확성 수정(적대적 R2)**: 버블차트 set_data 손상 차단(`RawUnsupportedError`), 비유한/모호(inf·nan·"1,5") 차트값 거부, bool 주소 강제변환 차단, O(shapes²)→단일 walk(`paragraphs_by_shape`), 윈도잉 콘텐츠앵커(따옴표 텍스트 매칭), 생성분기 op캡, `_as_num` 안전화, None 카테고리→"", 빈 placeholder set_text가 a:p 생성.
+
+**프레임워크 인터페이스(자기기술)**: `OP_CATALOG`(단일 진실원, 16 ops의 address/payload 계약) + `describe_ops()` 내성 + **`dry_run`**(무바이트 검증) + **`atomic`**(전부-or-무 롤백) + **`find_shapes`**(text/kind/name/slide 쿼리). VALID_PPTX_ACTIONS는 카탈로그에서 파생.
+
+**신규 저작 op**: `set_runs`(문단 내 다중 서식 런 — "한 단어만 굵게"), `add_textbox`·`delete_shape`·`duplicate_shape`(shape 생명주기), `insert_column`·`delete_column`·`merge_cells`(표 완성). 전부 바이트 보존. contextifier에 대응 raw 프리미티브 추가.
+
+## 🔜 Phase 2 로드맵 (다음)
+
+SVG 폴백을 완전 제거하기 위한 잔여 능력 (격차분석 우선순위):
+- **네이티브 레이아웃 슬라이드 삽입 + 플레이스홀더 채우기** (L, 최고가치 — "내용이 레이아웃 못 채움"의 완전 해결). contextifier에 슬라이드레이아웃/마스터/`p:ph` 리더 + `add_slide(layout)` 필요.
+- **스피커 노트 쓰기** (notesSlide 파트 생성/rel/content-type).
+- **하이퍼링크**(런/도형, `a:hlinkClick`+rel), **불릿/번호**(`a:buChar`/`a:buAutoNum`).
+- **차트 심화**: 타입변경·축제목·범례·데이터라벨·시리즈색; chartEx 쓰기.
+- **이미지**: 추가/교체/크롭(`p:pic`/`blipFill`/media 파트).
+- **z-order/그룹·언그룹**, **테마/마스터**(clrScheme·fontScheme 스왑).
+- **인터페이스**: 구조적 op을 1급 직접호출 verb로 노출(챗 planner는 한 클라이언트).
+
 ## 6. 착수 지점 제안
 
 Stage 0+1을 하나의 자립 PR로: `pptx_outline` + `pptx_engine`(set_shape_text / set_table_cell / table_insert_row/delete_row / set_chart_data/title) + 최소 planner. 표·차트·텍스트 in-place 편집 + 전체 보존을 먼저 실증한다.

@@ -161,7 +161,7 @@ async def edit_document(
         surgical = [
             o for o in raw_ops
             if isinstance(o, dict) and o.get("action") in VALID_PPTX_ACTIONS
-        ]
+        ][:_MAX_OPERATIONS]  # same cap as the normal path
         new_content, applied_ops = req.content, []
         if surgical:
             new_content, applied_ops, op_warnings, _ = _apply("pptx", req.content, surgical)
@@ -314,8 +314,15 @@ _SLIDE_REF = re.compile(r"\bslides?\.?\s*#?\s*(\d+)", re.IGNORECASE)
 _SLIDE_REF_KO = re.compile(r"(\d+)\s*(?:번째?|장)\s*(?:슬라이드|장|페이지)?")
 
 
-def _pptx_anchor_slides(req: EditDocRequest, max_slide: int) -> set[int]:
-    """1-based slide numbers the instruction/chat points at (for windowing)."""
+def _pptx_anchor_slides(
+    req: EditDocRequest, max_slide: int, per_slide: dict[int, list[dict]] | None = None
+) -> set[int]:
+    """1-based slide numbers the instruction/chat points at (for windowing).
+
+    Two signals, mirroring the docx anchor: an explicit slide number ("slide 3",
+    "3번 슬라이드") AND quoted / distinctive text that matches a slide's content
+    (so "change the title on the Revenue slide" anchors the Revenue slide even
+    without a number)."""
     text = "\n".join(
         [req.instruction] + [t.content for t in req.chat_history[-6:]]
     )
@@ -324,6 +331,17 @@ def _pptx_anchor_slides(req: EditDocRequest, max_slide: int) -> set[int]:
         n = int(m.group(1))
         if 1 <= n <= max_slide:
             out.add(n)
+    # Content anchor: quoted phrases (and, failing that, salient words) matched
+    # against each slide's text.
+    if per_slide:
+        quotes = [q.strip().lower() for q in _QUOTED.findall(text) if len(q.strip()) >= 3]
+        if quotes:
+            for n, entries in per_slide.items():
+                blob = " ".join(
+                    str(e.get("text") or e.get("title") or "") for e in entries
+                ).lower()
+                if any(q in blob for q in quotes):
+                    out.add(n)
     return out
 
 
@@ -355,7 +373,7 @@ def _pptx_outline_context(req: EditDocRequest, warnings: list[WarningEntry]) -> 
 
     # Windowed: keep anchored slides (± 1) in full, summarize the rest.
     max_slide = max(per_slide) if per_slide else 0
-    anchors = _pptx_anchor_slides(req, max_slide)
+    anchors = _pptx_anchor_slides(req, max_slide, per_slide)
     keep = set()
     for a in (anchors or {1, 2}):
         keep.update({a - 1, a, a + 1})
@@ -587,13 +605,16 @@ def _as_int(v):
 
 
 def _as_num(v):
-    """Coerce a numeric field (size_pt / inches) to float, else pass through."""
+    """Coerce a numeric field (size_pt / inches) to float. A non-numeric value
+    (e.g. '2in') becomes None — that coordinate is simply left unchanged — so it
+    never reaches EMU math as a string (which would build a giant throwaway
+    string before failing)."""
     if v is None or isinstance(v, bool):
-        return v
+        return None
     try:
         return float(v)
     except (TypeError, ValueError):
-        return v
+        return None
 
 
 def _as_bool(v):
@@ -652,6 +673,9 @@ def _apply(
                     top=_as_num(raw.get("top")),
                     width=_as_num(raw.get("width")),
                     height=_as_num(raw.get("height")),
+                    runs=raw.get("runs"),
+                    row2=_as_int(raw.get("row2")),
+                    col2=_as_int(raw.get("col2")),
                 )
             )
         new_content, results = apply_pptx_edits(content, edits)

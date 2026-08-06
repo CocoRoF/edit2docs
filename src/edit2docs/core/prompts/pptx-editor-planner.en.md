@@ -53,6 +53,18 @@ Lines look like:
   `categories` (list), `series` (list of `{name, values}` — every series's
   `values` length MUST equal `categories` length).
 - `set_chart_title` — set a chart's title. Fields: `slide`, `chart`, `title`.
+- `set_runs` — replace a paragraph with multiple independently-styled runs (e.g.
+  bold ONE word). Fields: `slide`, `shape`, `para?`, `runs` (a list of
+  `{text, bold?, italic?, color?, size_pt?}` in order).
+- `add_textbox` — add a new text box. Fields: `slide`, `new_text`, `left`,
+  `top`, `width`, `height` (inches), and optional `color`/`size_pt`/`bold`/`italic`.
+- `delete_shape` — remove a shape. Fields: `slide`, `shape`.
+- `duplicate_shape` — copy a shape. Fields: `slide`, `shape`, optional
+  `left`/`top` (inches) to place the copy.
+- `insert_column` — add a table column. Fields: `slide`, `shape`, `at?`.
+- `delete_column` — remove a table column. Fields: `slide`, `shape`, `col`.
+- `merge_cells` — merge a rectangular block of table cells. Fields: `slide`,
+  `shape`, `row`, `col` (top-left), `row2`, `col2` (bottom-right).
 
 ## When the request needs a NEW or fully REDESIGNED slide
 

@@ -17,8 +17,11 @@ from pptx.enum.chart import XL_CHART_TYPE
 from pptx.util import Emu, Inches, Pt
 
 from edit2docs.documents.pptx_engine import (
+    OP_CATALOG,
     PptxEdit,
     apply_pptx_edits,
+    describe_ops,
+    find_shapes,
     pptx_outline,
 )
 
@@ -355,6 +358,130 @@ class TestReviewFixes:
         ])
         assert results[0].status == "not_found"
         assert results[1].status == "applied"  # string table id + row/col coerced
+
+
+class TestFrameworkInterface:
+    def test_catalog_is_self_describing_and_matches_actions(self):
+        cat = describe_ops()
+        assert cat is not OP_CATALOG  # a copy, not the live dict
+        # every catalog action is valid, and each has address+payload contracts
+        for action, spec in cat.items():
+            assert "address" in spec and "payload" in spec and "summary" in spec
+
+    def test_find_shapes_by_text_and_kind(self):
+        deck = _deck()
+        by_text = find_shapes(deck, text="원본")
+        assert any(e["text"] == "원본 제목" for e in by_text)
+        assert all(e.get("kind") == "chart" for e in find_shapes(deck, kind="chart"))
+        assert find_shapes(deck, slide=2) and all(e["slide"] == 2 for e in find_shapes(deck, slide=2))
+
+    def test_dry_run_validates_without_writing(self):
+        deck = _deck()
+        title, _, _ = _ids(deck)
+        out, results = apply_pptx_edits(
+            deck, [PptxEdit("set_text", slide=1, shape=title, new_text="X")], dry_run=True
+        )
+        assert results[0].status == "applied"  # would apply
+        assert out == deck                       # but nothing written
+
+    def test_atomic_rolls_back_the_whole_batch_on_any_failure(self):
+        deck = _deck()
+        title, _, _ = _ids(deck)
+        out, results = apply_pptx_edits(deck, [
+            PptxEdit("set_text", slide=1, shape=title, new_text="APPLIED"),
+            PptxEdit("set_text", slide=9, shape=1, new_text="NOPE"),  # not_found
+        ], atomic=True)
+        assert [r.status for r in results] == ["applied", "not_found"]
+        assert out == deck  # the applied op was rolled back too
+
+
+class TestAuthoringOps:
+    def test_set_runs_mixed_formatting(self):
+        deck = _deck()
+        title, _, _ = _ids(deck)
+        out, results = apply_pptx_edits(deck, [
+            PptxEdit("set_runs", slide=1, shape=title, para=0,
+                     runs=[{"text": "Hello "}, {"text": "bold", "bold": True, "color": "FF0000"}]),
+        ])
+        assert results[0].status == "applied"
+        runs = next(
+            sh for sh in Presentation(io.BytesIO(out)).slides[0].shapes
+            if sh.shape_id == title
+        ).text_frame.paragraphs[0].runs
+        assert [(r.text, r.font.bold) for r in runs] == [("Hello ", None), ("bold", True)]
+
+    def test_add_delete_duplicate_shape(self):
+        deck = _deck()
+        title, _, _ = _ids(deck)
+        n0 = len(Presentation(io.BytesIO(deck)).slides[0].shapes)
+        out, results = apply_pptx_edits(deck, [
+            PptxEdit("add_textbox", slide=1, new_text="new box",
+                     left=1, top=6, width=3, height=1, bold=True),
+            PptxEdit("duplicate_shape", slide=1, shape=title, left=7, top=1),
+        ])
+        assert [r.status for r in results] == ["applied", "applied"]
+        s = Presentation(io.BytesIO(out)).slides[0]
+        assert len(s.shapes) == n0 + 2
+        assert "new box" in [sh.text_frame.text for sh in s.shapes if sh.has_text_frame]
+
+        out2, r2 = apply_pptx_edits(deck, [PptxEdit("delete_shape", slide=1, shape=title)])
+        assert r2[0].status == "applied"
+        s2 = Presentation(io.BytesIO(out2)).slides[0]
+        assert title not in {sh.shape_id for sh in s2.shapes}
+
+    def test_table_insert_column_and_merge(self):
+        deck = _deck()  # 3x3 table
+        _, table, _ = _ids(deck)
+        out, results = apply_pptx_edits(deck, [
+            PptxEdit("insert_column", slide=1, shape=table, at=1),
+            PptxEdit("set_table_cell", slide=1, shape=table, row=0, col=1, new_text="COL"),
+            PptxEdit("merge_cells", slide=1, shape=table, row=0, col=0, row2=0, col2=1),
+        ])
+        assert [r.status for r in results] == ["applied"] * 3
+        tbl = next(sh.table for sh in Presentation(io.BytesIO(out)).slides[0].shapes if sh.has_table)
+        assert len(tbl.columns) == 4  # 3 + 1 inserted
+        assert tbl.cell(0, 0)._tc.get("gridSpan") == "2"  # merged (0,0)-(0,1)
+
+    def test_table_delete_column(self):
+        deck = _deck()  # 3x3
+        _, table, _ = _ids(deck)
+        out, results = apply_pptx_edits(deck, [
+            PptxEdit("delete_column", slide=1, shape=table, col=1),
+        ])
+        assert results[0].status == "applied"
+        tbl = next(sh.table for sh in Presentation(io.BytesIO(out)).slides[0].shapes if sh.has_table)
+        assert len(tbl.columns) == 2
+        assert tbl.cell(0, 1).text == "R0C2"  # col 1 gone, old col 2 shifted left
+
+
+class TestCorrectnessR2:
+    """Regressions for the second adversarial-review round."""
+
+    def test_non_finite_and_ambiguous_chart_values_rejected(self):
+        deck = _deck()
+        _, results = apply_pptx_edits(deck, [
+            PptxEdit("set_chart_data", slide=1, chart=0,
+                     categories=["a", "b"], series=[{"name": "s", "values": [float("inf"), 1]}]),
+            PptxEdit("set_chart_data", slide=1, chart=0,
+                     categories=["a"], series=[{"name": "s", "values": ["1,5"]}]),
+        ])
+        assert results[0].status == "invalid"  # inf never written to numCache
+        assert results[1].status == "invalid"  # ambiguous European decimal
+
+    def test_thousands_separator_chart_value_ok(self):
+        deck = _deck()
+        out, results = apply_pptx_edits(deck, [
+            PptxEdit("set_chart_data", slide=1, chart=0,
+                     categories=["a"], series=[{"name": "s", "values": ["1,000"]}]),
+        ])
+        assert results[0].status == "applied"
+        chart = next(sh.chart for sh in Presentation(io.BytesIO(out)).slides[0].shapes if sh.has_chart)
+        assert list(chart.series[0].values) == [1000.0]
+
+    def test_bool_address_is_rejected_not_coerced_to_one(self):
+        deck = _deck()
+        _, results = apply_pptx_edits(deck, [PptxEdit("set_text", slide=1, shape=True, new_text="x")])
+        assert results[0].status in ("not_found", "invalid")  # not silently shape #1
 
 
 class TestGuardsAndErrors:
