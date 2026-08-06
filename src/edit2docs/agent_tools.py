@@ -341,14 +341,44 @@ OPENAI_TOOLS: list[dict[str, Any]] = [
 ]
 
 
-def tool_specs(fmt: str = "anthropic") -> list[dict[str, Any]]:
-    """The tool list for a backend: ``fmt`` = ``anthropic`` | ``openai``."""
-    fmt = (fmt or "anthropic").strip().lower()
-    if fmt == "anthropic":
-        return ANTHROPIC_TOOLS
-    if fmt == "openai":
-        return OPENAI_TOOLS
-    raise ValueError(f"unknown tool-spec format: {fmt!r} (anthropic | openai)")
+def tool_specs(
+    provider: str | None = None,
+    *,
+    extension: Any = None,
+    fmt: str | None = None,
+) -> list[dict[str, Any]]:
+    """The tool list for a backend, optionally scoped to a file extension.
+
+    * ``provider`` — ``anthropic`` (default) or ``openai`` (function-calling
+      shape). ``fmt`` is a deprecated alias for ``provider``.
+    * ``extension`` — when given (``"xlsx"`` / ``".pptx"`` / a path / a set of
+      them), returns only the verbs applicable to that document format, each
+      with its format-specialized description. Omit for the full, generic
+      set — the unscoped default is unchanged, so a caller that doesn't know
+      the format never loses a tool.
+    """
+    provider = (provider or fmt or "anthropic").strip().lower()
+    if provider not in ("anthropic", "openai"):
+        raise ValueError(f"unknown tool-spec provider: {provider!r} (anthropic | openai)")
+    if extension is None:
+        # Unscoped: return the module-level objects unchanged (identity preserved).
+        return OPENAI_TOOLS if provider == "openai" else ANTHROPIC_TOOLS
+    from .tool_matrix import scope_tools
+
+    anthropic_tools = scope_tools(ANTHROPIC_TOOLS, extension)
+    if provider == "openai":
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t["description"],
+                    "parameters": t["input_schema"],
+                },
+            }
+            for t in anthropic_tools
+        ]
+    return anthropic_tools
 
 
 async def run_tool_async(

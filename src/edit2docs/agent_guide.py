@@ -258,8 +258,29 @@ def _rename(text: str, names: dict[str, str] | None) -> str:
     return text
 
 
+def _topics_for(fmt) -> list[str]:
+    """The topic index, optionally scoped to a document format.
+
+    ``fmt`` (``"xlsx"`` / ``".pptx"`` / a path / a set of them) trims topics
+    that don't apply — a ``.docx`` session's index drops ``arrange`` and
+    ``recipes.slides``. Unknown / omitted ``fmt`` → the full list."""
+    if fmt is None:
+        return TOPICS
+    from .tool_matrix import topics_for
+
+    scoped = topics_for(fmt)
+    if scoped is None:
+        return TOPICS
+    # Preserve the canonical TOPICS order.
+    keep = set(scoped)
+    return [t for t in TOPICS if t in keep]
+
+
 def doc_guide(
-    topic: str | None = None, *, names: dict[str, str] | None = None
+    topic: str | None = None,
+    *,
+    names: dict[str, str] | None = None,
+    fmt=None,
 ) -> dict:
     """The progressive-disclosure entry point.
 
@@ -267,9 +288,13 @@ def doc_guide(
     * exact topic → that guide (+ its subtopics listed).
     * parent prefix (e.g. ``recipes``) → all child guides joined.
     * unknown topic → the family map with a note (never a dead end).
+
+    ``fmt`` (optional) scopes the returned ``topics`` index to the topics
+    relevant to that document format; the guide text is unchanged.
     """
+    topics = _topics_for(fmt)
     if not topic or not str(topic).strip():
-        return {"topic": "", "guide": _rename(ROOT, names), "topics": TOPICS}
+        return {"topic": "", "guide": _rename(ROOT, names), "topics": topics}
 
     t = str(topic).strip().lower().rstrip(".")
     if t in GUIDES:
@@ -277,17 +302,17 @@ def doc_guide(
         children = [k for k in TOPICS if k.startswith(t + ".")]
         if children:
             guide += "\n\nSubtopics: " + ", ".join(children)
-        return {"topic": t, "guide": _rename(guide, names), "topics": TOPICS}
+        return {"topic": t, "guide": _rename(guide, names), "topics": topics}
 
     children = [k for k in TOPICS if k.startswith(t + ".")]
     if children:
         joined = "\n\n────────\n\n".join(GUIDES[k] for k in children)
-        return {"topic": t, "guide": _rename(joined, names), "topics": TOPICS}
+        return {"topic": t, "guide": _rename(joined, names), "topics": topics}
 
     return {
         "topic": t,
         "guide": _rename(
             f"(unknown topic {t!r} — showing the family map)\n\n" + ROOT, names
         ),
-        "topics": TOPICS,
+        "topics": topics,
     }
