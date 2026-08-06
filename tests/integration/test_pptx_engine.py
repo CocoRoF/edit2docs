@@ -126,6 +126,36 @@ class TestSurgicalEdits:
         # slide1 DID change
         assert after["ppt/slides/slide1.xml"] != before["ppt/slides/slide1.xml"]
 
+    def test_editing_a_chart_preserves_other_slides(self):
+        """set_chart_data rewrites the chart part + embedded workbook — but not
+        an unrelated slide."""
+        deck = _deck()
+        before = _members(deck)
+        out, results = apply_pptx_edits(deck, [
+            PptxEdit("set_chart_data", slide=1, chart=0,
+                     categories=["Q1", "Q2"], series=[{"name": "s", "values": [5, 6]}]),
+        ])
+        assert results[0].status == "applied"
+        after = _members(out)
+        assert after["ppt/slides/slide2.xml"] == before["ppt/slides/slide2.xml"]
+        chart = next(sh.chart for sh in Presentation(io.BytesIO(out)).slides[0].shapes if sh.has_chart)
+        assert list(chart.series[0].values) == [5.0, 6.0]
+
+    def test_addresses_target_the_right_slide(self):
+        """An op on slide 2 must not touch slide 1 (multi-slide addressing)."""
+        deck = _deck()
+        s2_text = next(
+            e for e in pptx_outline(deck) if e.get("kind") == "text" and e["slide"] == 2
+        )
+        out, results = apply_pptx_edits(deck, [
+            PptxEdit("set_text", slide=2, shape=s2_text["shape"], para=0, new_text="둘째 변경"),
+        ])
+        assert results[0].status == "applied"
+        prs = Presentation(io.BytesIO(out))
+        assert "둘째 변경" in [sh.text_frame.text for sh in prs.slides[1].shapes if sh.has_text_frame]
+        # slide 1's title untouched
+        assert "원본 제목" in [sh.text_frame.text for sh in prs.slides[0].shapes if sh.has_text_frame]
+
     def test_delete_row(self):
         deck = _deck()
         _, table, _ = _ids(deck)
@@ -249,6 +279,82 @@ class TestStyleAndPosition:
         title, _, _ = _ids(deck)
         _, results = apply_pptx_edits(deck, [PptxEdit("set_shape_style", slide=1, shape=title)])
         assert results[0].status == "invalid"
+
+
+class TestReviewFixes:
+    """Regressions for the adversarial-review findings."""
+
+    def test_set_shape_style_para0_targets_only_first_paragraph(self):
+        prs = Presentation()
+        prs.slide_width = Emu(12192000)
+        prs.slide_height = Emu(6858000)
+        s = prs.slides.add_slide(prs.slide_layouts[6])
+        tb = s.shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(2))
+        tb.text_frame.paragraphs[0].add_run().text = "First"
+        tb.text_frame.add_paragraph().add_run().text = "Second"
+        sid = tb.shape_id
+        buf = io.BytesIO()
+        prs.save(buf)
+        deck = buf.getvalue()
+
+        out, _ = apply_pptx_edits(deck, [PptxEdit("set_shape_style", slide=1, shape=sid, para=0, bold=True)])
+        tf = next(x for x in Presentation(io.BytesIO(out)).slides[0].shapes if x.has_text_frame).text_frame
+        assert tf.paragraphs[0].runs[0].font.bold is True
+        assert tf.paragraphs[1].runs[0].font.bold is None  # para 1 untouched
+
+        out2, _ = apply_pptx_edits(deck, [PptxEdit("set_shape_style", slide=1, shape=sid, bold=True)])
+        tf2 = next(x for x in Presentation(io.BytesIO(out2)).slides[0].shapes if x.has_text_frame).text_frame
+        assert tf2.paragraphs[0].runs[0].font.bold is True
+        assert tf2.paragraphs[1].runs[0].font.bold is True  # no para = whole shape
+
+    def test_insert_row_then_populate_is_order_independent(self):
+        deck = _deck()
+        _, table, _ = _ids(deck)
+        for order in ("insert_first", "cell_first"):
+            ops = (
+                [PptxEdit("insert_row", slide=1, shape=table, at=1),
+                 PptxEdit("set_table_cell", slide=1, shape=table, row=1, col=0, new_text="NEW")]
+                if order == "insert_first" else
+                [PptxEdit("set_table_cell", slide=1, shape=table, row=1, col=0, new_text="NEW"),
+                 PptxEdit("insert_row", slide=1, shape=table, at=1)]
+            )
+            out, _ = apply_pptx_edits(deck, ops)
+            tbl = next(sh.table for sh in Presentation(io.BytesIO(out)).slides[0].shapes if sh.has_table)
+            assert len(tbl.rows) == 4
+            assert tbl.cell(1, 0).text == "NEW"       # new row populated
+            assert tbl.cell(2, 0).text == "R1C0"      # old row 1 shifted down
+
+    def test_literal_newline_in_run_keeps_para_index_aligned(self):
+        prs = Presentation()
+        prs.slide_width = Emu(12192000)
+        prs.slide_height = Emu(6858000)
+        s = prs.slides.add_slide(prs.slide_layouts[6])
+        tb = s.shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(2))
+        tb.text_frame.paragraphs[0].add_run().text = "Hello\nWorld"  # newline in one run
+        tb.text_frame.add_paragraph().add_run().text = "Bye"
+        sid = tb.shape_id
+        buf = io.BytesIO()
+        prs.save(buf)
+        deck = buf.getvalue()
+        paras = [e for e in pptx_outline(deck) if e.get("kind") == "text"]
+        assert len(paras) == 2  # two a:p, not three (would be 3 if split on "\n")
+        out, results = apply_pptx_edits(deck, [PptxEdit("set_text", slide=1, shape=sid, para=1, new_text="EDITED")])
+        assert results[0].status == "applied"
+        tf = next(x for x in Presentation(io.BytesIO(out)).slides[0].shapes if x.has_text_frame).text_frame
+        assert tf.paragraphs[0].text == "Hello\nWorld"  # untouched
+        assert tf.paragraphs[1].text == "EDITED"        # the right a:p
+
+    def test_string_addresses_never_crash_the_batch(self):
+        """Even a direct caller passing string addresses degrades to a per-op
+        result instead of raising out of apply_pptx_edits."""
+        deck = _deck()
+        _, table, _ = _ids(deck)
+        _, results = apply_pptx_edits(deck, [
+            PptxEdit("set_text", slide="1", shape="9999", new_text="x"),   # bad shape
+            PptxEdit("set_table_cell", slide="1", shape=str(table), row="0", col="0", new_text="Y"),
+        ])
+        assert results[0].status == "not_found"
+        assert results[1].status == "applied"  # string table id + row/col coerced
 
 
 class TestGuardsAndErrors:

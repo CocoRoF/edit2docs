@@ -113,7 +113,13 @@ def pptx_outline(content: bytes) -> list[dict]:
                 continue  # handled in the table pass below
             pos = _geometry_inches(info)
             if info.kind == "text":
-                paras = (info.text or "").split("\n")
+                # Per-a:p text (NOT text.split("\n")) so the para index the
+                # planner sees is the one set_text mutates, even with a literal
+                # newline inside a run.
+                try:
+                    paras = slide.get_paragraphs(info.id)
+                except Exception:
+                    paras = (info.text or "").split("\n")
                 emitted = False
                 for p_idx, para_text in enumerate(paras):
                     if para_text.strip():
@@ -208,7 +214,7 @@ class PptxEdit:
     action: str
     slide: int                       # 1-based slide number
     shape: int | None = None         # cNvPr id (text / table ops)
-    para: int = 0                    # paragraph index (set_text)
+    para: int | None = None          # paragraph index (None = whole shape / para 0)
     row: int | None = None           # table cell / delete_row
     col: int | None = None           # table cell
     at: int | None = None            # insert_row position
@@ -242,11 +248,50 @@ def _normalize(text: str) -> str:
     return " ".join((text or "").split())
 
 
+def _as_number(v):
+    """Coerce a chart value to float; None stays None (a gap in the series).
+    A non-numeric string raises ValueError → the op is reported ``invalid``."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return float(v)
+    if isinstance(v, (int, float)):
+        return float(v)
+    return float(str(v).replace(",", "").strip())
+
+
+def _safe_int(v, default: int = -1) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _opt_int(v):
+    """int(v) or None — keeps None as None; used to normalize address fields so
+    a string like '0' from any caller behaves like the int 0."""
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def _row_sort_key(edit: PptxEdit) -> tuple:
-    """Row-shifting ops (insert/delete) on the same table must run highest-row
-    first so earlier addresses stay valid — mirrors docx's descending sort."""
-    idx = edit.at if edit.at is not None else (edit.row if edit.row is not None else -1)
-    return (edit.slide, edit.shape if edit.shape is not None else -1, idx)
+    """Order ops within a table so addresses stay valid.
+
+    Applied with ``reverse=True``: higher row index first (so an insert/delete
+    at a high index doesn't shift a lower address before we reach it). The
+    trailing flag breaks ties at the SAME index so a structural op
+    (insert_row/delete_row) always runs BEFORE a content op
+    (set_table_cell/set_cell_style) — i.e. ``insert_row at=1`` then
+    ``set_table_cell row=1`` deterministically populates the NEW row,
+    regardless of the order the planner emitted them. All fields are coerced so
+    a stray string address can never crash the sort."""
+    idx = edit.at if edit.at is not None else edit.row
+    structural = 1 if edit.action in ("insert_row", "delete_row") else 0
+    return (_safe_int(edit.slide), _safe_int(edit.shape), _safe_int(idx), structural)
 
 
 def apply_pptx_edits(
@@ -282,11 +327,14 @@ def apply_pptx_edits(
 
 
 def _slide_of(raw, edit: PptxEdit):
-    """Resolve the 1-based ``edit.slide`` to a RawSlide, or None if invalid."""
+    """Resolve the 1-based ``edit.slide`` to a RawSlide, or None if invalid.
+
+    Coerces defensively so a non-int slide never raises out of the batch."""
     slides = raw.slides
-    if edit.slide is None or not (1 <= edit.slide <= len(slides)):
+    n = _safe_int(edit.slide, 0)
+    if not (1 <= n <= len(slides)):
         return None
-    return slides[edit.slide - 1]
+    return slides[n - 1]
 
 
 def _apply_one(raw, edit: PptxEdit) -> PptxEditResult:
@@ -296,6 +344,15 @@ def _apply_one(raw, edit: PptxEdit) -> PptxEditResult:
     slide = _slide_of(raw, edit)
     if slide is None:
         return PptxEditResult(edit.action, "not_found", "slide index out of range")
+
+    # Normalize address fields so a string like "0" behaves like int 0 for any
+    # caller (the LLM boundary also coerces; this is defense in depth).
+    edit.shape = _opt_int(edit.shape)
+    edit.para = _opt_int(edit.para)
+    edit.row = _opt_int(edit.row)
+    edit.col = _opt_int(edit.col)
+    edit.at = _opt_int(edit.at)
+    edit.chart = _opt_int(edit.chart)
 
     try:
         if edit.action == "set_text":
@@ -321,18 +378,18 @@ def _apply_set_text(slide, edit: PptxEdit) -> PptxEditResult:
     if edit.shape is None:
         return PptxEditResult(edit.action, "invalid", "set_text needs a shape id")
     try:
-        current_body = slide.get_text(edit.shape)
+        paras = slide.get_paragraphs(edit.shape)
     except KeyError:
         return PptxEditResult(edit.action, "not_found", "no shape with that id")
     except ValueError:
         return PptxEditResult(edit.action, "invalid", "shape has no editable text")
+    para = edit.para or 0  # set_text targets a single paragraph (None → first)
     if edit.old_text is not None:
-        paras = current_body.split("\n")
-        current = paras[edit.para] if 0 <= edit.para < len(paras) else ""
+        current = paras[para] if 0 <= para < len(paras) else ""
         if _normalize(current) != _normalize(edit.old_text):
             return PptxEditResult(edit.action, "stale", "paragraph text changed; refresh")
     try:
-        slide.set_text(edit.shape, edit.new_text, para=edit.para)
+        slide.set_text(edit.shape, edit.new_text, para=para)
     except IndexError:
         return PptxEditResult(edit.action, "not_found", "paragraph index out of range")
     return PptxEditResult(edit.action, "applied")
@@ -354,7 +411,7 @@ def _apply_set_shape_style(slide, edit: PptxEdit) -> PptxEditResult:
                 size_pt=edit.size_pt,
                 bold=edit.bold,
                 italic=edit.italic,
-                para=(edit.para if edit.para else None),
+                para=edit.para,  # None = whole shape; 0 = first paragraph only
             )
         if edit.fill is not None:
             slide.set_shape_fill(edit.shape, edit.fill)
@@ -368,8 +425,22 @@ def _apply_set_shape_style(slide, edit: PptxEdit) -> PptxEditResult:
 def _apply_set_shape_position(slide, edit: PptxEdit) -> PptxEditResult:
     if edit.shape is None:
         return PptxEditResult(edit.action, "invalid", "set_shape_position needs a shape id")
-    if all(v is None for v in (edit.left, edit.top, edit.width, edit.height)):
+    coords = (edit.left, edit.top, edit.width, edit.height)
+    if all(v is None for v in coords):
         return PptxEditResult(edit.action, "invalid", "set_shape_position needs a coordinate")
+
+    # A shape that inherits its placement from a placeholder has no explicit
+    # a:xfrm; creating one with only some coordinates would zero the rest and
+    # shrink the shape to nothing. Require all four in that case.
+    info = next((s for s in slide.shapes if s.id == edit.shape), None)
+    if info is None:
+        return PptxEditResult(edit.action, "not_found", "no shape with that id")
+    inherits_placement = getattr(info, "left", None) is None
+    if inherits_placement and any(v is None for v in coords):
+        return PptxEditResult(
+            edit.action, "invalid",
+            "this shape inherits its placement — provide left, top, width AND height",
+        )
 
     def _emu(v):
         return int(round(v * _EMU_PER_INCH)) if v is not None else None
@@ -385,11 +456,12 @@ def _apply_set_shape_position(slide, edit: PptxEdit) -> PptxEditResult:
     return PptxEditResult(edit.action, "applied")
 
 
-def _table_by_shape(slide, shape_id: int | None):
+def _table_by_shape(slide, shape_id):
     if shape_id is None:
         return None
+    sid = _safe_int(shape_id, None)
     for table in slide.tables:
-        if table.shape_id == shape_id:
+        if table.shape_id == sid:
             return table
     return None
 
@@ -465,11 +537,14 @@ def _apply_chart_op(slide, edit: PptxEdit) -> PptxEditResult:
                 )
             series: list[tuple[str | None, list]] = []
             for s in edit.series:
-                if isinstance(s, dict):
-                    series.append((s.get("name"), list(s.get("values") or [])))
-                else:  # (name, values) tuple
-                    series.append((s[0], list(s[1])))
-            chart.set_data(categories=list(edit.categories), series=series)
+                name, values = (
+                    (s.get("name"), s.get("values") or []) if isinstance(s, dict)
+                    else (s[0], s[1])
+                )
+                series.append((name, [_as_number(v) for v in values]))
+            chart.set_data(
+                categories=[str(c) for c in edit.categories], series=series
+            )
     except RawUnsupportedError as exc:
         return PptxEditResult(edit.action, "unsupported", str(exc))
     except ValueError as exc:

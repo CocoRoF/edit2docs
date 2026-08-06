@@ -151,14 +151,25 @@ async def edit_document(
 
     # PPTX: if the surgical planner decided the request needs new/redesigned
     # slides (beyond targeted text/table/chart edits), signal the executor to
-    # hand the whole turn to the SVG generator (tools.edit_deck).
+    # hand the turn to the SVG generator (tools.edit_deck). Any surgical ops the
+    # planner co-emitted are applied FIRST (so they aren't lost) and the
+    # surgically-edited deck is what the SVG generator continues from.
     if req.fmt == "pptx" and any(
         isinstance(o, dict) and o.get("action") in _PPTX_GENERATIVE_ACTIONS
         for o in raw_ops
     ):
+        surgical = [
+            o for o in raw_ops
+            if isinstance(o, dict) and o.get("action") in VALID_PPTX_ACTIONS
+        ]
+        new_content, applied_ops = req.content, []
+        if surgical:
+            new_content, applied_ops, op_warnings, _ = _apply("pptx", req.content, surgical)
+            warnings.extend(op_warnings)
         await _emit(on_event, StageEvent(stage="done", progress=1.0, message_key="stages.done"))
         return EditDocResponse(
-            content=req.content, changed=False, reply=reply, operations=[],
+            content=new_content, changed=bool(applied_ops), reply=reply,
+            operations=applied_ops,
             cost=CostBreakdown(
                 input_tokens=cost.input_tokens, output_tokens=cost.output_tokens,
                 cache_read_tokens=cost.cache_read_tokens,
@@ -242,7 +253,7 @@ def _outline_context(req: EditDocRequest, warnings: list[WarningEntry]) -> str:
     if req.fmt == "docx":
         return _docx_outline_context(req, warnings)
     if req.fmt == "pptx":
-        return _pptx_outline_context(req)
+        return _pptx_outline_context(req, warnings)
 
     # xlsx is already sample-bounded (sample_rows caps the per-sheet body),
     # so its outline size is independent of the workbook's row count — no
@@ -269,51 +280,111 @@ def _pos_str(pos: dict | None) -> str:
     )
 
 
-def _pptx_outline_context(req: EditDocRequest) -> str:
-    """Format the addressable slide model (documents/pptx_engine.pptx_outline)
-    into the exact address lines the pptx planner's ops resolve against."""
+def _pptx_entry_line(e: dict) -> str:
+    """Render one pptx_outline entry in the address format the planner uses."""
+    kind = e.get("kind")
+    if "table" in e and "row" in e:  # a table cell
+        return f"  - table {e['table']} cell ({e['row']},{e['col']}): {e['text'][:100]}"
+    if kind == "text":
+        name = f" \"{e['name']}\"" if e.get("name") else ""
+        return (
+            f"- shape {e['shape']}{name} para {e['para']}"
+            f"{_pos_str(e.get('pos'))}: {e['text'][:140]}"
+        )
+    if kind == "table":
+        return f"- table {e['shape']} ({e['rows']}x{e['cols']} — edit cells by (row,col))"
+    if kind == "chart":
+        ser = "; ".join(
+            f"{s['name']}=[{', '.join(str(v) for v in s['values'][:8])}]"
+            for s in (e.get("series") or [])[:4]
+        )
+        cats = ", ".join(
+            str(c) for c in ((e.get("series") or [{}])[0].get("categories") or [])[:8]
+        )
+        title = f" \"{e['title']}\"" if e.get("title") else ""
+        return (
+            f"- chart {e['chart']} [{e.get('chart_type')}]{title}: "
+            f"categories=[{cats}] series: {ser}"
+        )
+    name = f" \"{e['name']}\"" if e.get("name") else ""
+    return f"- shape {e['shape']} [{kind}]{name}{_pos_str(e.get('pos'))}"
+
+
+_SLIDE_REF = re.compile(r"\bslides?\.?\s*#?\s*(\d+)", re.IGNORECASE)
+_SLIDE_REF_KO = re.compile(r"(\d+)\s*(?:번째?|장)\s*(?:슬라이드|장|페이지)?")
+
+
+def _pptx_anchor_slides(req: EditDocRequest, max_slide: int) -> set[int]:
+    """1-based slide numbers the instruction/chat points at (for windowing)."""
+    text = "\n".join(
+        [req.instruction] + [t.content for t in req.chat_history[-6:]]
+    )
+    out: set[int] = set()
+    for m in list(_SLIDE_REF.finditer(text)) + list(_SLIDE_REF_KO.finditer(text)):
+        n = int(m.group(1))
+        if 1 <= n <= max_slide:
+            out.add(n)
+    return out
+
+
+def _pptx_outline_context(req: EditDocRequest, warnings: list[WarningEntry]) -> str:
+    """Format the addressable slide model into the planner's address lines.
+
+    Small decks are sent in full. A large deck (over the char budget — many
+    slides or big tables, re-sent every turn) is WINDOWED: slides the
+    instruction references (± a neighbour) keep full detail; the rest collapse
+    to a one-line summary so every slide stays addressable and the planner can
+    ask to expand one."""
     entries = pptx_outline(req.content)
-    lines = [
+    per_slide: dict[int, list[dict]] = {}
+    for e in entries:
+        per_slide.setdefault(e["slide"], []).append(e)
+
+    header = [
         "# Deck outline (slide / shape / table / chart addresses)",
         "# Edit in place — reference the shape/table/chart by the ids shown.",
     ]
-    current_slide = None
-    for e in entries:
-        if e["slide"] != current_slide:
-            current_slide = e["slide"]
-            lines.append(f"## slide {current_slide}")
-        kind = e.get("kind")
-        if "table" in e and "row" in e:  # a table cell
-            lines.append(
-                f"  - table {e['table']} cell ({e['row']},{e['col']}): {e['text'][:100]}"
-            )
-        elif kind == "text":
-            name = f" \"{e['name']}\"" if e.get("name") else ""
-            pos = _pos_str(e.get("pos"))
-            lines.append(
-                f"- shape {e['shape']}{name} para {e['para']}{pos}: {e['text'][:140]}"
-            )
-        elif kind == "table":
-            lines.append(
-                f"- table {e['shape']} ({e['rows']}x{e['cols']} — edit cells by (row,col))"
-            )
-        elif kind == "chart":
-            ser = "; ".join(
-                f"{s['name']}=[{', '.join(str(v) for v in s['values'][:8])}]"
-                for s in (e.get("series") or [])[:4]
-            )
-            cats = ", ".join(
-                str(c) for c in ((e.get("series") or [{}])[0].get("categories") or [])[:8]
-            )
-            title = f" \"{e['title']}\"" if e.get("title") else ""
-            lines.append(
-                f"- chart {e['chart']} [{e.get('chart_type')}]{title}: "
-                f"categories=[{cats}] series: {ser}"
-            )
-        else:  # picture / group / diagram / other
-            name = f" \"{e['name']}\"" if e.get("name") else ""
-            lines.append(f"- shape {e['shape']} [{kind}]{name}{_pos_str(e.get('pos'))}")
-    return "\n".join(lines)
+
+    def _slide_block(n: int) -> list[str]:
+        return [f"## slide {n}"] + [_pptx_entry_line(e) for e in per_slide[n]]
+
+    full = header + [ln for n in sorted(per_slide) for ln in _slide_block(n)]
+    full_text = "\n".join(full)
+    if len(full_text) <= _OUTLINE_CHAR_BUDGET:
+        return full_text
+
+    # Windowed: keep anchored slides (± 1) in full, summarize the rest.
+    max_slide = max(per_slide) if per_slide else 0
+    anchors = _pptx_anchor_slides(req, max_slide)
+    keep = set()
+    for a in (anchors or {1, 2}):
+        keep.update({a - 1, a, a + 1})
+
+    out = header + [
+        "# WINDOWED (large deck): slides you referenced are shown in full; "
+        "others are summarized — ask to see a specific slide for full detail.",
+    ]
+    for n in sorted(per_slide):
+        if n in keep:
+            out.extend(_slide_block(n))
+        else:
+            counts: dict[str, int] = {}
+            for e in per_slide[n]:
+                k = "cell" if ("table" in e and "row" in e) else e.get("kind", "shape")
+                counts[k] = counts.get(k, 0) + 1
+            summary = ", ".join(f"{v} {k}" for k, v in counts.items())
+            out.append(f"## slide {n} — ({summary}; ask to expand)")
+    warnings.append(
+        WarningEntry(
+            code="pptx_outline_windowed",
+            message=(
+                f"Deck outline exceeded {_OUTLINE_CHAR_BUDGET} chars; sent a "
+                "windowed view (referenced slides in full, others summarized)."
+            ),
+            detail={"slides": max_slide, "shown_full": sorted(keep & set(per_slide))},
+        )
+    )
+    return "\n".join(out)
 
 
 def _outline_line(entry: dict) -> str:
@@ -498,6 +569,48 @@ _VALID_ACTIONS = {
 }
 
 
+def _as_int(v):
+    """Coerce an address field to int — LLMs sometimes emit '3' or 3.0 for a
+    slide/shape/row. Non-numeric values pass through unchanged so the engine
+    flags them rather than a silent crash."""
+    if v is None or isinstance(v, bool):
+        return v
+    if isinstance(v, int):
+        return v
+    try:
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        try:
+            return int(float(v))
+        except (TypeError, ValueError):
+            return v
+
+
+def _as_num(v):
+    """Coerce a numeric field (size_pt / inches) to float, else pass through."""
+    if v is None or isinstance(v, bool):
+        return v
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return v
+
+
+def _as_bool(v):
+    """Coerce a bold/italic flag to bool — accepts true/false/1/0/'true'."""
+    if v is None or isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(v)
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("true", "yes", "1", "on"):
+            return True
+        if s in ("false", "no", "0", "off"):
+            return False
+    return v
+
+
 def _apply(
     fmt: str, content: bytes, raw_ops: list
 ) -> tuple[bytes, list[dict], list[WarningEntry], list[tuple[dict, str]]]:
@@ -518,27 +631,27 @@ def _apply(
             edits.append(
                 PptxEdit(
                     action=raw["action"],
-                    slide=raw.get("slide"),
-                    shape=raw.get("shape"),
-                    para=raw.get("para", 0) or 0,
-                    row=raw.get("row"),
-                    col=raw.get("col"),
-                    at=raw.get("at"),
-                    chart=raw.get("chart"),
+                    slide=_as_int(raw.get("slide")),
+                    shape=_as_int(raw.get("shape")),
+                    para=_as_int(raw.get("para")),  # None = whole shape / first para
+                    row=_as_int(raw.get("row")),
+                    col=_as_int(raw.get("col")),
+                    at=_as_int(raw.get("at")),
+                    chart=_as_int(raw.get("chart")),
                     new_text=str(raw["new_text"]) if raw.get("new_text") is not None else "",
                     old_text=raw.get("old_text"),
                     title=raw.get("title"),
                     categories=raw.get("categories"),
                     series=raw.get("series"),
                     color=raw.get("color"),
-                    size_pt=raw.get("size_pt"),
-                    bold=raw.get("bold"),
-                    italic=raw.get("italic"),
+                    size_pt=_as_num(raw.get("size_pt")),
+                    bold=_as_bool(raw.get("bold")),
+                    italic=_as_bool(raw.get("italic")),
                     fill=raw.get("fill"),
-                    left=raw.get("left"),
-                    top=raw.get("top"),
-                    width=raw.get("width"),
-                    height=raw.get("height"),
+                    left=_as_num(raw.get("left")),
+                    top=_as_num(raw.get("top")),
+                    width=_as_num(raw.get("width")),
+                    height=_as_num(raw.get("height")),
                 )
             )
         new_content, results = apply_pptx_edits(content, edits)

@@ -125,9 +125,13 @@ async def run_edit_deck(ctx: ExecutionContext) -> None:
         on_event=on_event,
     )
     if fmt == "pptx" and getattr(resp, "needs_svg", False):
+        # Continue from the surgically-edited deck (resp.content) so any
+        # in-place edits the planner co-emitted are preserved, then run the SVG
+        # generator for the new/redesigned slides.
+        surgical_cost = resp.cost
         resp = await edit_deck(
             EditDeckRequest(
-                pptx=pptx_bytes,
+                pptx=resp.content,
                 instruction=instruction,
                 sources=convert_reqs,
                 chat_history=turns,
@@ -137,6 +141,11 @@ async def run_edit_deck(ctx: ExecutionContext) -> None:
             ),
             on_event=on_event,
         )
+        # Bill both planner calls (surgical + SVG) — don't undercount telemetry.
+        resp.cost.input_tokens += surgical_cost.input_tokens
+        resp.cost.output_tokens += surgical_cost.output_tokens
+        resp.cost.cache_read_tokens += surgical_cost.cache_read_tokens
+        resp.cost.cache_write_tokens += surgical_cost.cache_write_tokens
         new_content = resp.pptx
     else:
         new_content = resp.content

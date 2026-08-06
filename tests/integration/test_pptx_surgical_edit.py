@@ -158,6 +158,55 @@ class TestPptxSurgicalEdit:
         assert resp.changed is False
         assert resp.content == deck
 
+    def test_string_addresses_and_values_are_coerced(self):
+        """LLMs sometimes emit addresses/values as strings ('1', '20', '9').
+        The apply boundary coerces them instead of silently failing."""
+        from edit2docs.documents.pptx_engine import pptx_outline
+        from edit2docs.tools.edit_doc import _apply
+
+        deck = _deck()
+        title = next(e["shape"] for e in pptx_outline(deck) if e.get("kind") == "text")
+        raw_ops = [
+            {"action": "set_text", "slide": "1", "shape": str(title), "para": "0",
+             "new_text": "coerced"},
+            {"action": "set_shape_style", "slide": "1", "shape": title,
+             "size_pt": "20", "bold": "true"},
+            {"action": "set_chart_data", "slide": "1", "chart": "0",
+             "categories": ["A", "B"], "series": [{"name": "S", "values": ["9", "8"]}]},
+        ]
+        out, applied, _w, opres = _apply("pptx", deck, raw_ops)
+        assert [st for _o, st in opres] == ["applied", "applied", "applied"]
+        prs = Presentation(io.BytesIO(out))
+        s1 = prs.slides[0]
+        assert "coerced" in [sh.text_frame.text for sh in s1.shapes if sh.has_text_frame]
+        chart = next(sh.chart for sh in s1.shapes if sh.has_chart)
+        assert list(chart.series[0].values) == [9.0, 8.0]
+
+    def test_large_deck_outline_is_windowed(self):
+        from pptx.util import Inches
+
+        from edit2docs.tools.edit_doc import EditDocRequest, _pptx_outline_context
+
+        prs = Presentation()
+        prs.slide_width = Emu(12192000)
+        prs.slide_height = Emu(6858000)
+        for i in range(60):
+            s = prs.slides.add_slide(prs.slide_layouts[6])
+            t = s.shapes.add_table(6, 4, Inches(0.5), Inches(1), Inches(9), Inches(4)).table
+            for r in range(6):
+                for c in range(4):
+                    t.cell(r, c).text = f"slide{i + 1} r{r} c{c} some longer content"
+        buf = io.BytesIO()
+        prs.save(buf)
+        req = EditDocRequest(content=buf.getvalue(), fmt="pptx",
+                             instruction="30번 슬라이드 표 고쳐줘", anthropic_api_key="x")
+        warns: list = []
+        outline = _pptx_outline_context(req, warns)
+        assert any(w.code == "pptx_outline_windowed" for w in warns)
+        assert len(outline) < 30000  # would be ~100KB unwindowed
+        assert "## slide 30\n" in outline + "\n"  # referenced slide shown full
+        assert "## slide 5 —" in outline  # distant slide summarized
+
     @pytest.mark.asyncio
     async def test_generative_request_signals_needs_svg(self, monkeypatch):
         """A new-slide / full-redesign plan defers to the SVG generator: the
@@ -177,3 +226,32 @@ class TestPptxSurgicalEdit:
         assert resp.needs_svg is True
         assert resp.changed is False
         assert resp.content == deck  # surgical path made no change; SVG path takes over
+
+    @pytest.mark.asyncio
+    async def test_mixed_turn_applies_surgical_before_deferring_to_svg(self, monkeypatch):
+        """A plan mixing a surgical op with a generative op still applies the
+        surgical edit (not lost), and hands the edited deck to the SVG path."""
+        import sys
+
+        from edit2docs.documents.pptx_engine import pptx_outline
+
+        deck = _deck()
+        title = next(e["shape"] for e in pptx_outline(deck) if e.get("kind") == "text")
+        ed = sys.modules["edit2docs.tools.edit_doc"]
+        plan = (
+            "```reply\n제목을 바꾸고 요약 슬라이드를 추가합니다.\n```\n"
+            "```edit_plan\noperations:\n"
+            f'  - action: set_text\n    slide: 1\n    shape: {title}\n    para: 0\n    new_text: "새 제목"\n'
+            '  - action: add_slide\n    after: 1\n    brief: "요약"\n```'
+        )
+        monkeypatch.setattr(ed, "AnthropicClient", lambda **kw: _PlanLLM(plan))
+
+        resp = await edit_document(_req(deck, "제목 바꾸고 요약 슬라이드 추가"))
+        assert resp.needs_svg is True
+        # the surgical set_text WAS applied to the deck handed onward
+        assert resp.changed is True
+        assert "새 제목" in [
+            sh.text_frame.text
+            for sh in Presentation(io.BytesIO(resp.content)).slides[0].shapes
+            if sh.has_text_frame
+        ]
