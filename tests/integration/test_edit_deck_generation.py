@@ -299,3 +299,101 @@ class TestEditDeckNativeProtection:
         assert not any(
             w.code == "native_objects_preserved" for w in resp.warnings
         )
+
+
+# ---------------------------------------------------------------------------
+# Slide-render self-correction: a slide whose SVG won't convert (e.g. a
+# truncated base64 image) is regenerated with the exact converter error fed
+# back to the model, instead of failing the whole turn.
+# ---------------------------------------------------------------------------
+
+PLAN_SINGLE_EDIT = (
+    "```reply\n2번 슬라이드를 수정합니다.\n```\n"
+    "```edit_plan\n"
+    "operations:\n"
+    '  - action: edit\n    slide: 2\n    brief: "제목 교체"\n'
+    "```"
+)
+
+# An <image> whose base64 payload has length 42813 (≡ 1 mod 4) — exactly the
+# "cannot be 1 more than a multiple of 4" failure the user hit in prod.
+BAD_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" '
+    'xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1280 720">'
+    '<image x="0" y="0" width="100" height="100" '
+    'xlink:href="data:image/png;base64,' + ("A" * 42813) + '"/>'
+    "</svg>"
+)
+
+
+@dataclass
+class _FlakySlideLLM:
+    """Planner gets `plan`; the slide editor returns a broken SVG for its
+    first `fail_times` calls, then the good NEW_SVG."""
+
+    plan: str
+    fail_times: int
+    slide_calls: int = 0
+    slide_users: list = field(default_factory=list)
+
+    async def complete(self, system_prompt, user_message, **kwargs):
+        if "Deck Edit Planner" in system_prompt:
+            text = self.plan
+        else:
+            self.slide_calls += 1
+            self.slide_users.append(user_message)
+            text = (
+                f"```svg\n{BAD_SVG}\n```"
+                if self.slide_calls <= self.fail_times
+                else f"```svg\n{NEW_SVG}\n```"
+            )
+        return LLMResult(
+            text=text,
+            usage=LLMUsage(input_tokens=10, output_tokens=10),
+            model="stub",
+            stop_reason="end_turn",
+        )
+
+
+class TestSlideRenderRetry:
+    @pytest.mark.asyncio
+    async def test_bad_base64_is_retried_then_succeeds(self, monkeypatch, tmp_path):
+        llm = _FlakySlideLLM(plan=PLAN_SINGLE_EDIT, fail_times=1)
+        import sys
+
+        ed = sys.modules["edit2docs.tools.edit_deck"]
+        monkeypatch.setattr(ed, "AnthropicClient", lambda **kw: llm)
+
+        resp = await edit_deck(_request(_host_pptx_bytes(tmp_path)))
+
+        assert resp.changed is True
+        # Slide editor called twice: 1 failed render + 1 successful retry.
+        assert llm.slide_calls == 2
+        # The retry prompt carried the exact converter error back to the model.
+        assert "FAILED TO RENDER" in llm.slide_users[1]
+        assert "base64" in llm.slide_users[1]
+        # No render-failure warning, and the edit landed.
+        assert not any(w.code == "edit_slide_render_failed" for w in resp.warnings)
+        texts = _texts(resp.pptx, tmp_path)
+        assert any("채팅으로 편집된" in t for t in texts)
+
+    @pytest.mark.asyncio
+    async def test_persistent_bad_render_keeps_original_no_crash(
+        self, monkeypatch, tmp_path
+    ):
+        llm = _FlakySlideLLM(plan=PLAN_SINGLE_EDIT, fail_times=99)
+        import sys
+
+        ed = sys.modules["edit2docs.tools.edit_deck"]
+        monkeypatch.setattr(ed, "AnthropicClient", lambda **kw: llm)
+
+        original = _host_pptx_bytes(tmp_path)
+        resp = await edit_deck(_request(original))
+
+        # Tried the cap, then gave up gracefully: original kept, turn unchanged.
+        assert llm.slide_calls == 3
+        assert resp.changed is False
+        assert resp.pptx == original
+        failed = [w for w in resp.warnings if w.code == "edit_slide_render_failed"]
+        assert len(failed) == 1
+        assert "42813" in failed[0].message

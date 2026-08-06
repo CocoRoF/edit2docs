@@ -30,6 +30,7 @@ import yaml
 from pydantic import Field
 
 from ..config import resolve_model
+from ..core.svg_to_pptx.drawingml_converter import convert_svg_to_slide_shapes
 from ..core.svg_to_pptx.layout_repair import repair_layout
 from ..core.svg_to_pptx.pptx_edit import KeepSlide, NewSlide, recompose_pptx
 from ..core.svg_to_pptx.svg_scale import scale_svg_to_viewbox
@@ -242,13 +243,14 @@ async def edit_deck(
     slide_system = build_output_lang_directive(req.lang) + "\n\n" + load_prompt("editor-slide")
 
     async def _gen(op: dict) -> tuple[dict, str | None]:
+        summary = op_summaries[id(op)]
         await _emit(
             on_event,
             StageEvent(
                 stage="editing_slides",
                 progress=0.5,
                 message_key="stages.editing_slides",
-                message_vars=op_event_vars(op_summaries[id(op)], phase="start"),
+                message_vars=op_event_vars(summary, phase="start"),
             ),
         )
         if op["action"] == "edit":
@@ -263,55 +265,87 @@ async def edit_deck(
                 f"the content per the brief.\n\n## Brief\n{op['brief']}"
             )
         stubbed, image_map = _stub_images(base_svg)
-        user_message = (
+        base_user_message = (
             f"# Canvas\nviewBox: 0 0 {canvas_w:g} {canvas_h:g}\n\n"
             f"# Task\n{task}\n\n# Current slide SVG\n```svg\n{stubbed}\n```"
         )
-        r = await client.complete(
-            system_prompt=slide_system,
-            user_message=user_message,
-            max_output_tokens=16384,
-            cache_system=True,
-            model=req.model,
-        )
-        nonlocal cost
-        cost = _merge_cost(cost, _cost_from_usage(r.usage))
-        svg = _extract_svg_block(r.text)
-        if svg is None:
-            warnings.append(
-                WarningEntry(
-                    code="edit_slide_svg_missing",
-                    message=(
-                        f"Slide editor returned no SVG for op {op}; the "
-                        "operation was skipped."
+
+        # Generate → validate → (on a conversion error) feed the exact error
+        # back to the model and regenerate. A slide only reaches the deck once
+        # it actually converts to PPTX, so one bad image can't kill the turn.
+        repair_brief = ""
+        last_error: str | None = None
+        for attempt in range(_MAX_SLIDE_ATTEMPTS):
+            if attempt > 0:
+                # Surface the self-correction in the live activity log.
+                await _emit(
+                    on_event,
+                    StageEvent(
+                        stage="editing_slides", progress=0.55,
+                        message_key="stages.editing_slides",
+                        message_vars=op_event_vars(
+                            summary, phase="start", status="retry"
+                        ),
                     ),
                 )
+            r = await client.complete(
+                system_prompt=slide_system,
+                user_message=base_user_message + repair_brief,
+                max_output_tokens=16384,
+                cache_system=True,
+                model=req.model,
             )
-            await _emit(
-                on_event,
-                StageEvent(
-                    stage="editing_slides", progress=0.6,
-                    message_key="stages.editing_slides",
-                    message_vars=op_event_vars(
-                        op_summaries[id(op)], phase="done", status="failed"
+            nonlocal cost
+            cost = _merge_cost(cost, _cost_from_usage(r.usage))
+
+            svg = _extract_svg_block(r.text)
+            if svg is None:
+                last_error = "The response contained no <svg> block."
+                repair_brief = _slide_retry_directive(last_error)
+                continue
+
+            svg = _restore_images(svg, image_map)
+            svg = scale_svg_to_viewbox(svg, canvas_w, canvas_h)
+            candidate = repair_layout(
+                svg, canvas=(int(canvas_w), int(canvas_h))
+            ).repaired_svg
+
+            last_error = await asyncio.to_thread(_try_convert_svg, candidate)
+            if last_error is None:
+                await _emit(
+                    on_event,
+                    StageEvent(
+                        stage="editing_slides", progress=0.6,
+                        message_key="stages.editing_slides",
+                        message_vars=op_event_vars(
+                            summary, phase="done", status="applied"
+                        ),
                     ),
+                )
+                return op, candidate
+            repair_brief = _slide_retry_directive(last_error)
+
+        # Exhausted retries — keep the original slide (edit) / skip (add) rather
+        # than fail the whole deck, and record why.
+        warnings.append(
+            WarningEntry(
+                code="edit_slide_render_failed",
+                message=(
+                    f"Slide op {op} could not be rendered after "
+                    f"{_MAX_SLIDE_ATTEMPTS} attempts; the original slide was "
+                    f"kept unchanged. Last error: {last_error}"
                 ),
             )
-            return op, None
-        svg = _restore_images(svg, image_map)
-        svg = scale_svg_to_viewbox(svg, canvas_w, canvas_h)
-        repaired = repair_layout(svg, canvas=(int(canvas_w), int(canvas_h)))
+        )
         await _emit(
             on_event,
             StageEvent(
                 stage="editing_slides", progress=0.6,
                 message_key="stages.editing_slides",
-                message_vars=op_event_vars(
-                    op_summaries[id(op)], phase="done", status="applied"
-                ),
+                message_vars=op_event_vars(summary, phase="done", status="failed"),
             ),
         )
-        return op, repaired.repaired_svg
+        return op, None
 
     svg_ops = [op for op in operations if op["action"] in ("edit", "add")]
     # Emit delete ops (no LLM step) as their own done events for the UI.
@@ -739,6 +773,49 @@ def _validate_operations(
 # ---------------------------------------------------------------------------
 
 _DATA_URI = re.compile(r"(href=[\"'])(data:[^\"']+)([\"'])")
+
+
+#: How many times a single slide is regenerated when its SVG won't convert to
+#: PPTX. Each retry re-prompts the model with the *exact* converter error so it
+#: can self-correct (e.g. a truncated base64 image) instead of failing the deck.
+_MAX_SLIDE_ATTEMPTS = 3
+
+
+def _try_convert_svg(svg: str) -> str | None:
+    """Dry-run the SVG→PPTX conversion for one slide.
+
+    Returns ``None`` if the slide converts cleanly, otherwise the converter's
+    error string. This is the exact code path the final recompose runs, so a
+    slide that passes here will not blow up the whole deck later. Runs the
+    conversion (base64 image decode included) but skips image optimization —
+    we only need to know whether it *would* convert.
+    """
+    import tempfile
+    from pathlib import Path as _Path
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="e2d-validate-") as d:
+            path = _Path(d) / "candidate.svg"
+            path.write_text(svg, encoding="utf-8")
+            convert_svg_to_slide_shapes(path, image_optimize=False)
+        return None
+    except Exception as exc:  # SvgNativeConversionError + anything downstream
+        return str(exc)
+
+
+def _slide_retry_directive(error: str) -> str:
+    """Feed a converter error back to the slide editor as a repair brief."""
+    return (
+        "\n\n# ⚠ YOUR PREVIOUS SLIDE FAILED TO RENDER — FIX IT AND RESEND\n"
+        "The SVG you produced could not be converted to PowerPoint. The exact "
+        f"error was:\n\n    {error}\n\n"
+        "Output the COMPLETE corrected slide SVG again inside a ```svg fence. "
+        "If the error mentions base64 or an <image>: do NOT write raw base64 "
+        "image data yourself — keep every image placeholder token "
+        "(asset:IMG_1, asset:IMG_2, …) EXACTLY as it appears in the source "
+        "slide, or remove that <image> element entirely. Never truncate or "
+        "invent image data, and never leave an attribute value cut off."
+    )
 
 
 def _stub_images(svg: str) -> tuple[str, dict[str, str]]:
