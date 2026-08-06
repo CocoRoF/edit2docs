@@ -99,7 +99,8 @@ class EditDocResponse(ToolResponse):
 
 
 #: PPTX planner sentinels that mean "hand this turn to the SVG generator".
-_PPTX_GENERATIVE_ACTIONS = {"redesign", "add_slide"}
+#: (add_slide is now a NATIVE, layout-aware op — no longer an SVG sentinel.)
+_PPTX_GENERATIVE_ACTIONS = {"redesign"}
 
 
 async def edit_document(
@@ -676,6 +677,18 @@ def _apply(
                     runs=raw.get("runs"),
                     row2=_as_int(raw.get("row2")),
                     col2=_as_int(raw.get("col2")),
+                    after=_as_int(raw.get("after")),
+                    layout=raw.get("layout"),
+                    body=(str(raw["body"]) if raw.get("body") is not None else None),
+                    url=raw.get("url"),
+                    bullet=raw.get("bullet"),
+                    order=raw.get("order"),
+                    run=_as_int(raw.get("run")),
+                    position=raw.get("position"),
+                    series_index=_as_int(raw.get("series_index")),
+                    theme_name=raw.get("theme_name"),
+                    typeface=raw.get("typeface"),
+                    which=raw.get("which"),
                 )
             )
         new_content, results = apply_pptx_edits(content, edits)

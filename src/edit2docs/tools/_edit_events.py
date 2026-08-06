@@ -94,6 +94,28 @@ def _pptx_target(op: dict, lang: str) -> tuple[dict, str]:
         shape = op.get("shape")
         label = f"{n}번 슬라이드 표 셀 병합" if ko else f"Merge table cells on slide {n}"
         return {"kind": "table", "slide": n, "shape": shape}, label
+    if action == "set_notes":
+        label = f"{n}번 슬라이드 노트 편집" if ko else f"Edit speaker notes on slide {n}"
+        return {"kind": "slide", "slide": n}, label
+    if action == "set_bullet":
+        shape = op.get("shape")
+        label = f"{n}번 슬라이드 글머리표 설정" if ko else f"Set bullet on slide {n}"
+        return {"kind": "shape", "slide": n, "shape": shape}, label
+    if action == "set_hyperlink":
+        shape = op.get("shape")
+        label = f"{n}번 슬라이드 링크 추가" if ko else f"Add a hyperlink on slide {n}"
+        return {"kind": "shape", "slide": n, "shape": shape}, label
+    if action == "set_z_order":
+        shape = op.get("shape")
+        label = f"{n}번 슬라이드 순서 변경" if ko else f"Reorder a shape on slide {n}"
+        return {"kind": "shape", "slide": n, "shape": shape}, label
+    if action in ("set_legend", "set_series_color"):
+        chart = op.get("chart")
+        label = f"{n}번 슬라이드 차트 서식" if ko else f"Style a chart on slide {n}"
+        return {"kind": "chart", "slide": n, "chart": chart}, label
+    if action in ("set_theme_color", "set_theme_font"):
+        label = "테마 변경 (덱 전체)" if ko else "Change the deck theme"
+        return {"kind": "deck"}, label
     if action == "insert_row":
         shape = op.get("shape")
         label = f"{n}번 슬라이드 표에 행 추가" if ko else f"Add a table row on slide {n}"
@@ -118,6 +140,12 @@ def _pptx_target(op: dict, lang: str) -> tuple[dict, str]:
     if action == "redesign":
         label = f"{n}번 슬라이드 재구성" if ko else f"Redesign slide {n}"
         return {"kind": "slide", "slide": n}, label
+    if action == "add_slide":
+        after = op.get("after", 0)
+        label = (
+            f"{after}번 뒤 새 슬라이드 추가" if ko else f"Add a new slide after {after}"
+        ) if after else ("맨 앞에 새 슬라이드 추가" if ko else "Add a new slide at the start")
+        return {"kind": "slide_after", "after": after}, label
     if action == "add":
         after = op.get("after", 0)
         if after == 0:

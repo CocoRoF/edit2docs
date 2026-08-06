@@ -454,6 +454,47 @@ class TestAuthoringOps:
         assert tbl.cell(0, 1).text == "R0C2"  # col 1 gone, old col 2 shifted left
 
 
+class TestNativeAddSlide:
+    def test_add_slide_from_layout_fills_placeholders(self):
+        prs = Presentation()
+        prs.slide_width = Emu(12192000)
+        prs.slide_height = Emu(6858000)
+        prs.slides.add_slide(prs.slide_layouts[6])  # one blank slide
+        buf = io.BytesIO()
+        prs.save(buf)
+        deck = buf.getvalue()
+
+        out, results = apply_pptx_edits(deck, [
+            PptxEdit("add_slide", after=1, layout="Title and Content",
+                     title="요약", body="한 줄\n두 줄\n세 줄"),
+            PptxEdit("add_slide", layout="Section Header", title="2부"),
+        ])
+        assert [r.status for r in results] == ["applied", "applied"]
+        prs2 = Presentation(io.BytesIO(out))
+        assert len(prs2.slides) == 3
+        s1 = prs2.slides[1]
+        assert s1.slide_layout.name == "Title and Content"
+        texts = {str(ph.placeholder_format.type): ph.text for ph in s1.placeholders if ph.text}
+        assert any("요약" in v for v in texts.values())
+        body = next(ph.text for ph in s1.placeholders if "\n" in (ph.text or ""))
+        assert body.split("\n") == ["한 줄", "두 줄", "세 줄"]  # 3 real paragraphs
+        assert prs2.slides[2].slide_layout.name == "Section Header"
+
+    def test_add_slide_default_layout_is_title_and_body(self):
+        prs = Presentation()
+        prs.slides.add_slide(prs.slide_layouts[6])
+        buf = io.BytesIO()
+        prs.save(buf)
+        out, results = apply_pptx_edits(buf.getvalue(), [
+            PptxEdit("add_slide", title="T", body="B"),
+        ])
+        assert results[0].status == "applied"
+        s = Presentation(io.BytesIO(out)).slides[-1]
+        types = {ph.placeholder_format.type for ph in s.placeholders}
+        # a real content layout has both a title and a body-ish placeholder
+        assert any("TITLE" in str(t) for t in types)
+
+
 class TestCorrectnessR2:
     """Regressions for the second adversarial-review round."""
 
@@ -482,6 +523,69 @@ class TestCorrectnessR2:
         deck = _deck()
         _, results = apply_pptx_edits(deck, [PptxEdit("set_text", slide=1, shape=True, new_text="x")])
         assert results[0].status in ("not_found", "invalid")  # not silently shape #1
+
+
+class TestPhase2Ops:
+    def _rich_deck(self):
+        from pptx.chart.data import CategoryChartData
+        from pptx.enum.chart import XL_CHART_TYPE
+        prs = Presentation()
+        prs.slide_width = Emu(12192000)
+        prs.slide_height = Emu(6858000)
+        s = prs.slides.add_slide(prs.slide_layouts[6])
+        tb = s.shapes.add_textbox(Inches(1), Inches(1), Inches(5), Inches(2))
+        tb.text_frame.paragraphs[0].add_run().text = "첫 줄"
+        tb.text_frame.add_paragraph().add_run().text = "둘째 줄"
+        cd = CategoryChartData()
+        cd.categories = ["A", "B"]
+        cd.add_series("S", (1.0, 2.0))
+        s.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(1), Inches(4), Inches(4), Inches(2), cd)
+        buf = io.BytesIO()
+        prs.save(buf)
+        return buf.getvalue(), tb.shape_id
+
+    def test_notes_bullets_hyperlink_zorder(self):
+        deck, tid = self._rich_deck()
+        out, results = apply_pptx_edits(deck, [
+            PptxEdit("set_notes", slide=1, new_text="발표 노트\n둘째 줄"),
+            PptxEdit("set_bullet", slide=1, shape=tid, para=0, bullet="bullet"),
+            PptxEdit("set_bullet", slide=1, shape=tid, para=1, bullet="number"),
+            PptxEdit("set_hyperlink", slide=1, shape=tid, para=0, run=0, url="https://x.com"),
+            PptxEdit("set_z_order", slide=1, shape=tid, order="front"),
+        ])
+        assert [r.status for r in results] == ["applied"] * 5
+        prs = Presentation(io.BytesIO(out))
+        assert prs.slides[0].notes_slide.notes_text_frame.text.split("\n") == ["발표 노트", "둘째 줄"]
+        run = next(sh for sh in prs.slides[0].shapes if sh.shape_id == tid).text_frame.paragraphs[0].runs[0]
+        assert run.hyperlink.address == "https://x.com"
+
+    def test_chart_legend_and_series_color(self):
+        deck, _ = self._rich_deck()
+        out, results = apply_pptx_edits(deck, [
+            PptxEdit("set_legend", slide=1, chart=0, position="b"),
+            PptxEdit("set_series_color", slide=1, chart=0, series_index=0, color="FF0000"),
+        ])
+        assert [r.status for r in results] == ["applied", "applied"]
+        chart = next(sh.chart for sh in Presentation(io.BytesIO(out)).slides[0].shapes if sh.has_chart)
+        assert chart.has_legend
+
+    def test_theme_color_and_font(self):
+        deck, _ = self._rich_deck()
+        out, results = apply_pptx_edits(deck, [
+            PptxEdit("set_theme_color", theme_name="accent1", color="00AA55"),
+            PptxEdit("set_theme_font", which="minor", typeface="Malgun Gothic"),
+        ])
+        assert [r.status for r in results] == ["applied", "applied"]
+        import zipfile
+        th = zipfile.ZipFile(io.BytesIO(out)).read("ppt/theme/theme1.xml").decode()
+        assert "00AA55" in th and "Malgun Gothic" in th
+
+    def test_invalid_theme_slot_is_not_found(self):
+        deck, _ = self._rich_deck()
+        _, results = apply_pptx_edits(deck, [
+            PptxEdit("set_theme_color", theme_name="nope", color="FFFFFF"),
+        ])
+        assert results[0].status == "not_found"
 
 
 class TestGuardsAndErrors:

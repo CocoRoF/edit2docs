@@ -217,7 +217,7 @@ class TestPptxSurgicalEdit:
         plan = (
             "```reply\n요약 슬라이드를 새로 추가합니다.\n```\n"
             "```edit_plan\noperations:\n"
-            '  - action: add_slide\n    after: 1\n    brief: "요약 슬라이드"\n```'
+            '  - action: redesign\n    slide: 1\n    brief: "완전히 새 디자인"\n```'
         )
         monkeypatch.setattr(ed, "AnthropicClient", lambda **kw: _PlanLLM(plan))
 
@@ -242,7 +242,7 @@ class TestPptxSurgicalEdit:
             "```reply\n제목을 바꾸고 요약 슬라이드를 추가합니다.\n```\n"
             "```edit_plan\noperations:\n"
             f'  - action: set_text\n    slide: 1\n    shape: {title}\n    para: 0\n    new_text: "새 제목"\n'
-            '  - action: add_slide\n    after: 1\n    brief: "요약"\n```'
+            '  - action: redesign\n    slide: 1\n    brief: "재디자인"\n```'
         )
         monkeypatch.setattr(ed, "AnthropicClient", lambda **kw: _PlanLLM(plan))
 

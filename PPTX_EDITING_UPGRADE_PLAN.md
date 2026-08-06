@@ -155,7 +155,18 @@ contextifier raw 레이어에 **이미 존재하지만 PPTX 도구로 미배선*
 
 **신규 저작 op**: `set_runs`(문단 내 다중 서식 런 — "한 단어만 굵게"), `add_textbox`·`delete_shape`·`duplicate_shape`(shape 생명주기), `insert_column`·`delete_column`·`merge_cells`(표 완성). 전부 바이트 보존. contextifier에 대응 raw 프리미티브 추가.
 
-## 🔜 Phase 2 로드맵 (다음)
+## ✅ Phase 2 완료 (2026-08-06) — 네이티브 저작 + 풀서피스 op (25종)
+
+- **네이티브 add_slide**(레이아웃 사용·플레이스홀더 채움 → "내용이 레이아웃 채움" 완전 해결; SVG 폴백 제거) + set_paragraphs.
+- **set_notes**(노트슬라이드 파트 생성 포함), **set_bullet**, **set_hyperlink**, **set_z_order**.
+- **차트 심화**: set_legend, set_series_color.
+- **테마**: set_theme_color, set_theme_font(덱 전체).
+- 전부 바이트 보존(contextifier 0.8.0 raw 프리미티브). 회귀 edit2docs 949·contextifier 640.
+
+### 🔜 Phase 3 (남은 것)
+이미지 추가/교체/크롭, 차트 축제목·데이터라벨·타입변경, 표 셀 분할·열너비/행높이, 그룹/언그룹, 구조적 op의 1급 직접호출 verb 노출.
+
+## 🔜 (구) Phase 2 로드맵
 
 SVG 폴백을 완전 제거하기 위한 잔여 능력 (격차분석 우선순위):
 - **네이티브 레이아웃 슬라이드 삽입 + 플레이스홀더 채우기** (L, 최고가치 — "내용이 레이아웃 못 채움"의 완전 해결). contextifier에 슬라이드레이아웃/마스터/`p:ph` 리더 + `add_slide(layout)` 필요.

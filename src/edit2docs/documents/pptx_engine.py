@@ -129,6 +129,52 @@ OP_CATALOG: dict[str, dict] = {
         "address": ["slide", "shape", "row", "col"],
         "payload": ["row2", "col2"],  # bottom-right of the block
     },
+    "add_slide": {
+        "summary": "Insert a NEW native slide from a layout, filling its "
+                   "title/body placeholders (content fills the layout).",
+        "address": ["after?"],  # insert after this 1-based slide (0 = start)
+        "payload": ["layout?", "title?", "body?"],
+    },
+    "set_notes": {
+        "summary": "Set a slide's speaker-notes text.",
+        "address": ["slide"],
+        "payload": ["new_text"],
+    },
+    "set_bullet": {
+        "summary": "Set a paragraph's bullet (bullet / number / none).",
+        "address": ["slide", "shape", "para?"],
+        "payload": ["bullet?"],
+    },
+    "set_hyperlink": {
+        "summary": "Attach a hyperlink to a text run or the whole shape.",
+        "address": ["slide", "shape", "para?", "run?"],
+        "payload": ["url"],
+    },
+    "set_z_order": {
+        "summary": "Bring a shape to the front or send it to the back.",
+        "address": ["slide", "shape"],
+        "payload": ["order"],
+    },
+    "set_legend": {
+        "summary": "Show/hide/position a chart legend (r/l/t/b/tr/none).",
+        "address": ["slide", "chart"],
+        "payload": ["position"],
+    },
+    "set_series_color": {
+        "summary": "Set a chart series' fill color.",
+        "address": ["slide", "chart"],
+        "payload": ["series_index", "color"],
+    },
+    "set_theme_color": {
+        "summary": "Swap a theme color deck-wide (accent1..6, dk1/2, lt1/2, hlink).",
+        "address": [],
+        "payload": ["theme_name", "color"],
+    },
+    "set_theme_font": {
+        "summary": "Swap the major/minor theme font deck-wide.",
+        "address": [],
+        "payload": ["which", "typeface"],
+    },
 }
 
 #: Every action the surgical engine understands (derived from the catalog).
@@ -307,7 +353,7 @@ class PptxEdit:
     """
 
     action: str
-    slide: int                       # 1-based slide number
+    slide: int | None = None         # 1-based slide number (None for add_slide)
     shape: int | None = None         # cNvPr id (text / table ops)
     para: int | None = None          # paragraph index (None = whole shape / para 0)
     row: int | None = None           # table cell / delete_row
@@ -335,6 +381,20 @@ class PptxEdit:
     # merge_cells — bottom-right of the block
     row2: int | None = None
     col2: int | None = None
+    # add_slide
+    after: int | None = None         # insert after this 1-based slide (0 = start)
+    layout: object = None            # layout index (int) or a name/type hint (str)
+    body: str | None = None          # body placeholder text (lines split on \n)
+    # set_notes / set_bullet / set_hyperlink / set_z_order / chart depth / theme
+    url: str | None = None
+    bullet: str | None = None        # "bullet" | "number" | "none"
+    order: str | None = None         # "front" | "back"
+    run: int | None = None           # run index for set_hyperlink
+    position: str | None = None      # legend position
+    series_index: int | None = None  # series ordinal for set_series_color
+    theme_name: str | None = None    # theme color slot
+    typeface: str | None = None      # theme font
+    which: str | None = None
 
 
 @dataclass
@@ -512,6 +572,12 @@ def _apply_one(raw, edit: PptxEdit) -> PptxEditResult:
     if edit.action not in VALID_PPTX_ACTIONS:
         return PptxEditResult(edit.action, "invalid", f"unknown action {edit.action!r}")
 
+    # Document-level ops (no single slide) are handled before slide resolution.
+    if edit.action == "add_slide":
+        return _apply_add_slide(raw, edit)
+    if edit.action in ("set_theme_color", "set_theme_font"):
+        return _apply_theme_op(raw, edit)
+
     slide = _slide_of(raw, edit)
     if slide is None:
         return PptxEditResult(edit.action, "not_found", "slide index out of range")
@@ -526,6 +592,8 @@ def _apply_one(raw, edit: PptxEdit) -> PptxEditResult:
     edit.chart = _opt_int(edit.chart)
     edit.row2 = _opt_int(edit.row2)
     edit.col2 = _opt_int(edit.col2)
+    edit.run = _opt_int(edit.run)
+    edit.series_index = _opt_int(edit.series_index)
 
     try:
         if edit.action == "set_text":
@@ -550,6 +618,17 @@ def _apply_one(raw, edit: PptxEdit) -> PptxEditResult:
             return _apply_row_op(slide, edit)
         if edit.action == "merge_cells":
             return _apply_merge_cells(slide, edit)
+        if edit.action == "set_notes":
+            slide.set_notes(edit.new_text or "")
+            return PptxEditResult(edit.action, "applied")
+        if edit.action == "set_bullet":
+            return _apply_set_bullet(slide, edit)
+        if edit.action == "set_hyperlink":
+            return _apply_set_hyperlink(slide, edit)
+        if edit.action == "set_z_order":
+            return _apply_set_z_order(slide, edit)
+        if edit.action in ("set_legend", "set_series_color"):
+            return _apply_chart_depth(slide, edit)
         if edit.action in ("set_chart_data", "set_chart_title"):
             return _apply_chart_op(slide, edit)
     except Exception as exc:  # last-resort: one bad op never kills the batch
@@ -575,6 +654,66 @@ def _apply_set_text(slide, edit: PptxEdit) -> PptxEditResult:
         slide.set_text(edit.shape, edit.new_text, para=para)
     except IndexError:
         return PptxEditResult(edit.action, "not_found", "paragraph index out of range")
+    return PptxEditResult(edit.action, "applied")
+
+
+#: placeholder types that hold the slide title / the main body.
+_TITLE_PH = ("title", "ctrTitle")
+_BODY_PH = ("body", "subTitle", "obj")
+
+
+def _pick_layout(layouts: list[dict], hint) -> int:
+    """Resolve a layout index from an int index or a name/type hint, defaulting
+    to a title+body layout ('Title and Content' / obj) so a plain add_slide
+    still fills a real layout."""
+    if isinstance(hint, bool):
+        hint = None
+    if isinstance(hint, int):
+        return hint if 0 <= hint < len(layouts) else _pick_layout(layouts, None)
+    if isinstance(hint, str) and hint.strip():
+        h = hint.strip().lower()
+        for lay in layouts:  # match on name or type
+            if h in (lay.get("name") or "").lower() or h == (lay.get("type") or "").lower():
+                return lay["index"]
+    # default: a layout with both a title and a body placeholder
+    for lay in layouts:
+        types = {p.get("type") for p in lay.get("placeholders", [])}
+        if types & set(_TITLE_PH) and types & set(_BODY_PH):
+            return lay["index"]
+    return 0
+
+
+def _apply_add_slide(raw, edit: PptxEdit) -> PptxEditResult:
+    layouts = raw.layouts
+    if not layouts:
+        return PptxEditResult(edit.action, "unsupported", "deck has no slide layouts")
+    layout_index = _pick_layout(layouts, edit.layout)
+    # `after` is 1-based (0 = start); contextifier add_slide uses a 0-based
+    # insertion position = number of slides before the new one.
+    at = None if edit.after is None else max(0, _safe_int(edit.after, len(raw.slides)))
+    try:
+        new_slide = raw.add_slide(layout_index, at=at)
+    except (IndexError, ValueError) as exc:
+        return PptxEditResult(edit.action, "invalid", str(exc))
+    # fill title / body placeholders — the new slide's text shapes are created
+    # in the layout's placeholder order, so map them back to their ph types.
+    title_id = body_id = None
+    layout_phs = [p for p in layouts[layout_index]["placeholders"]]
+    text_shapes = [s for s in new_slide.shapes if s.kind == "text"]
+    for info, ph in zip(text_shapes, layout_phs, strict=False):
+        t = ph.get("type")
+        if t in _TITLE_PH and title_id is None:
+            title_id = info.id
+        elif t in _BODY_PH and body_id is None:
+            body_id = info.id
+    if edit.title and title_id is not None:
+        new_slide.set_text(title_id, edit.title)
+    elif edit.title and text_shapes:
+        new_slide.set_text(text_shapes[0].id, edit.title)
+    if edit.body and body_id is not None:
+        new_slide.set_paragraphs(body_id, edit.body.split("\n"))
+    elif edit.body and edit.new_text is None and len(text_shapes) > 1 and body_id is None:
+        new_slide.set_paragraphs(text_shapes[1].id, edit.body.split("\n"))
     return PptxEditResult(edit.action, "applied")
 
 
@@ -717,6 +856,94 @@ def _apply_set_shape_position(slide, edit: PptxEdit) -> PptxEditResult:
         )
     except KeyError:
         return PptxEditResult(edit.action, "not_found", "no shape with that id")
+    return PptxEditResult(edit.action, "applied")
+
+
+def _apply_theme_op(raw, edit: PptxEdit) -> PptxEditResult:
+    try:
+        if edit.action == "set_theme_color":
+            if not (edit.theme_name and edit.color):
+                return PptxEditResult(
+                    edit.action, "invalid", "set_theme_color needs theme_name+color"
+                )
+            raw.set_theme_color(str(edit.theme_name), str(edit.color))
+        else:  # set_theme_font
+            if not (edit.which and edit.typeface):
+                return PptxEditResult(edit.action, "invalid", "set_theme_font needs which+typeface")
+            raw.set_theme_font(str(edit.which), str(edit.typeface))
+    except ValueError as exc:
+        return PptxEditResult(edit.action, "not_found", str(exc))
+    return PptxEditResult(edit.action, "applied")
+
+
+def _apply_set_bullet(slide, edit: PptxEdit) -> PptxEditResult:
+    if edit.shape is None:
+        return PptxEditResult(edit.action, "invalid", "set_bullet needs a shape id")
+    style = (edit.bullet or "bullet").lower()
+    if style not in ("bullet", "number", "none"):
+        return PptxEditResult(edit.action, "invalid", "bullet must be bullet|number|none")
+    try:
+        slide.set_paragraph_bullet(edit.shape, edit.para or 0, style=style)
+    except KeyError:
+        return PptxEditResult(edit.action, "not_found", "no shape with that id")
+    except IndexError:
+        return PptxEditResult(edit.action, "not_found", "paragraph index out of range")
+    except ValueError:
+        return PptxEditResult(edit.action, "invalid", "shape has no editable text")
+    return PptxEditResult(edit.action, "applied")
+
+
+def _apply_set_hyperlink(slide, edit: PptxEdit) -> PptxEditResult:
+    if edit.shape is None:
+        return PptxEditResult(edit.action, "invalid", "set_hyperlink needs a shape id")
+    if not (edit.url or "").strip():
+        return PptxEditResult(edit.action, "invalid", "set_hyperlink needs a url")
+    try:
+        slide.set_hyperlink(edit.shape, str(edit.url), para=edit.para, run=edit.run)
+    except KeyError:
+        return PptxEditResult(edit.action, "not_found", "no shape with that id")
+    except IndexError:
+        return PptxEditResult(edit.action, "not_found", "paragraph/run index out of range")
+    except ValueError as exc:
+        return PptxEditResult(edit.action, "invalid", str(exc))
+    return PptxEditResult(edit.action, "applied")
+
+
+def _apply_set_z_order(slide, edit: PptxEdit) -> PptxEditResult:
+    if edit.shape is None:
+        return PptxEditResult(edit.action, "invalid", "set_z_order needs a shape id")
+    order = (edit.order or "front").lower()
+    if order not in ("front", "back"):
+        return PptxEditResult(edit.action, "invalid", "order must be front|back")
+    try:
+        slide.set_z_order(edit.shape, to_front=(order == "front"))
+    except KeyError:
+        return PptxEditResult(edit.action, "not_found", "no shape with that id")
+    except ValueError as exc:
+        return PptxEditResult(edit.action, "invalid", str(exc))
+    return PptxEditResult(edit.action, "applied")
+
+
+def _apply_chart_depth(slide, edit: PptxEdit) -> PptxEditResult:
+    from contextifier.raw.opc import RawUnsupportedError
+
+    charts = slide.charts
+    if edit.chart is None or not (0 <= edit.chart < len(charts)):
+        return PptxEditResult(edit.action, "not_found", "chart index out of range")
+    chart = charts[edit.chart]
+    try:
+        if edit.action == "set_legend":
+            chart.set_legend(edit.position or "r")
+        else:  # set_series_color
+            if edit.series_index is None or not (edit.color or "").strip():
+                return PptxEditResult(
+                    edit.action, "invalid", "set_series_color needs series_index+color"
+                )
+            chart.set_series_color(edit.series_index, str(edit.color))
+    except RawUnsupportedError as exc:
+        return PptxEditResult(edit.action, "unsupported", str(exc))
+    except (IndexError, ValueError) as exc:
+        return PptxEditResult(edit.action, "invalid", str(exc))
     return PptxEditResult(edit.action, "applied")
 
 

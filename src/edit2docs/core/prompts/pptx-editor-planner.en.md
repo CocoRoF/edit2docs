@@ -65,23 +65,37 @@ Lines look like:
 - `delete_column` — remove a table column. Fields: `slide`, `shape`, `col`.
 - `merge_cells` — merge a rectangular block of table cells. Fields: `slide`,
   `shape`, `row`, `col` (top-left), `row2`, `col2` (bottom-right).
+- `set_bullet` — set a paragraph's bullet. Fields: `slide`, `shape`, `para?`,
+  `bullet` ("bullet" | "number" | "none").
+- `set_hyperlink` — add a link. Fields: `slide`, `shape`, `url`, and `para`+`run`
+  to link one text run (omit them to link the whole shape).
+- `set_z_order` — Fields: `slide`, `shape`, `order` ("front" | "back").
+- `set_notes` — set a slide's speaker notes. Fields: `slide`, `new_text`.
+- `set_legend` — show/position a chart legend. Fields: `slide`, `chart`,
+  `position` ("r"|"l"|"t"|"b"|"tr"|"none").
+- `set_series_color` — Fields: `slide`, `chart`, `series_index`, `color` (RRGGBB).
+- `set_theme_color` — recolor the deck theme. Fields: `theme_name`
+  ("accent1".."accent6", "dk1"/"dk2", "lt1"/"lt2", "hlink"), `color` (RRGGBB).
+- `set_theme_font` — Fields: `which` ("major"|"minor"), `typeface`.
 
-## When the request needs a NEW or fully REDESIGNED slide
+- `add_slide` — add a NEW slide from a layout, filling its title/body. Fields:
+  `after` (insert after this 1-based slide; `0` = start), optional `layout` (a
+  name/type hint like "Title and Content", "Section Header", "Blank", or a
+  layout index), `title`, `body` (lines separated by newlines become bullet
+  paragraphs). The new slide uses a real layout, so its content fills the
+  layout properly. Use this for "add a summary slide", "add a section slide".
 
-The operations above edit existing content in place. They cannot create a
-brand-new slide or re-lay-out a slide's visual design from scratch. If — and
-only if — the instruction genuinely requires that (e.g. "add a summary slide",
-"design a new title slide", "completely redesign slide 4's layout"), emit a
-single generative op and NOTHING else; the system hands the turn to the slide
-generator:
+## When the request needs a fully REDESIGNED slide
 
-- `redesign` — `{action: redesign, slide: N, brief: "..."}` for a full visual
-  redo of an existing slide.
-- `add_slide` — `{action: add_slide, after: N, brief: "..."}` for a new slide
-  (`after: 0` = at the start).
+The operations above edit existing content and add clean layout-based slides.
+For a full VISUAL redesign of an existing slide from scratch (rich custom
+graphics, not just text/table/chart edits), emit a single op and NOTHING else;
+the system hands the turn to the visual generator:
 
-Do NOT use these for ordinary edits — retitling, changing a value, editing a
-cell or a chart, reordering — those are always the surgical ops above.
+- `redesign` — `{action: redesign, slide: N, brief: "..."}`.
+
+Do NOT use `redesign` for ordinary edits or for simply adding a slide — those
+are the surgical ops and `add_slide` above.
 
 ## Rules
 
