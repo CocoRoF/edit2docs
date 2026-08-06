@@ -27,12 +27,11 @@ from sqlalchemy import select
 
 from ...db.models import Asset, AssetKind, JobEventType, JobKind, JobStatus
 from ...services.assets import upload_asset
-from ...services.jobs import record_event
+from ...services.jobs import make_event_sink, record_event
 from ...storage import get_default_storage
 from ...tools import (
     ConvertRequest,
     GenerateDeckRequest,
-    StageEvent,
     generate_deck,
 )
 from .registry import ExecutionContext, register
@@ -113,23 +112,10 @@ async def run_generate_deck(ctx: ExecutionContext) -> None:
         return
 
     # 2. Stream tool-layer StageEvents to the job event bus.
-    async def on_event(event: StageEvent) -> None:
-        await record_event(
-            session=session,
-            bus=bus,
-            job_id=job.id,
-            type=JobEventType.stage if event.stage else JobEventType.progress,
-            payload={
-                "stage": event.stage,
-                "progress": event.progress,
-                "message_key": event.message_key,
-                "message_vars": event.message_vars,
-                "page_index": event.page_index,
-            },
-        )
-        # We commit per event so SSE subscribers see them in real time.
-        # If a downstream stage raises, prior events stay in the DB.
-        await session.commit()
+    # Progress events stream from asyncio.gather fan-outs (one coroutine per
+    # page). make_event_sink serializes the concurrent writes on this session
+    # with a lock so they can't race and kill the job. See make_event_sink.
+    on_event = make_event_sink(session, bus, job.id)
 
     # 3. Run the orchestrator.
     deck_resp = await generate_deck(

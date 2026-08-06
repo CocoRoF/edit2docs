@@ -349,3 +349,87 @@ class TestGenerateDeckExecutor:
         # is Korean-friendly.
         stages = [e["data"].get("payload", {}).get("stage") for e in events if "data" in e]
         assert "done" in stages
+
+
+class TestInlineRunnerFailure:
+    """Regression: a job whose executor raises must reach `failed` AND emit a
+    terminal `failed` stage event, so SSE clients stop instead of hanging
+    forever (the 30-minute "editing…" ghost). See jobs._fail_job."""
+
+    @pytest.mark.asyncio
+    async def test_failing_executor_marks_failed_and_emits_terminal_event(
+        self,
+        client: httpx.AsyncClient,
+        test_db,
+        test_bus: FakeJobBus,
+        monkeypatch,
+    ):
+        from sqlalchemy import select
+
+        from edit2docs.api.routes import jobs as jobs_routes
+        from edit2docs.db.models import JobKind
+        from edit2docs.services.jobs import make_event_sink
+        from edit2docs.tools import StageEvent
+        from edit2docs.workers.executors.registry import EXECUTORS
+
+        # Point the inline runner at the in-memory test DB.
+        monkeypatch.setattr(jobs_routes, "get_sessionmaker", lambda: test_db)
+
+        # A failing executor that first streams a couple of concurrent events
+        # (exercising make_event_sink's lock), then raises mid-flight.
+        async def _boom(ctx):
+            on_event = make_event_sink(ctx.session, ctx.bus, ctx.job.id)
+            await asyncio.gather(
+                on_event(StageEvent(stage="editing_slides", progress=0.5,
+                                    message_key="stages.editing_slides")),
+                on_event(StageEvent(stage="editing_slides", progress=0.5,
+                                    message_key="stages.editing_slides")),
+            )
+            raise RuntimeError("slide editor exploded")
+
+        monkeypatch.setitem(EXECUTORS, JobKind.edit_deck, _boom)
+
+        # An upload establishes the default tenant (same tenant CurrentTenant
+        # resolves for the poll below).
+        await client.post(
+            "/v1/assets",
+            files={"file": ("d.pptx", b"PK\x03\x04stub", "application/octet-stream")},
+        )
+
+        # Insert an edit-deck job row directly (executor is stubbed).
+        async with test_db() as session:
+            from edit2docs.db.models import JobStatus, Tenant
+
+            tenant = (await session.execute(select(Tenant))).scalars().first()
+            job = Job(
+                tenant_id=tenant.id,
+                kind=JobKind.edit_deck,
+                status=JobStatus.queued,
+                params={"anthropic_api_key": "sk-ant-stub"},
+            )
+            session.add(job)
+            await session.commit()
+            job_id = job.id
+
+        # Drive the inline runner directly.
+        await jobs_routes._run_inline(job_id)
+
+        # Job must be terminally failed with the error recorded.
+        poll = await client.get(f"/v1/jobs/{job_id}")
+        assert poll.status_code == 200
+        body = poll.json()
+        assert body["status"] == "failed"
+        assert "exploded" in (body["error_message"] or "")
+
+        # A terminal `failed` stage event must be present so the SSE stream ends.
+        events = []
+        async with client.stream("GET", f"/v1/jobs/{job_id}/events") as resp:
+            assert resp.status_code == 200
+            async for line in resp.aiter_lines():
+                if line.startswith("data:"):
+                    try:
+                        events.append(json.loads(line.split(":", 1)[1].strip()))
+                    except json.JSONDecodeError:
+                        pass
+        stages = [e.get("payload", {}).get("stage") for e in events]
+        assert "failed" in stages

@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from typing import AsyncIterator, Protocol
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import Settings, get_settings
 from ..db.models import Job, JobEvent, JobEventType, JobKind, JobStatus, Tenant
@@ -297,6 +297,48 @@ async def record_event(
     except Exception:  # pragma: no cover - publish failures shouldn't fail the worker
         pass
     return event
+
+
+def make_event_sink(session: AsyncSession, bus: JobBus, job_id: uuid.UUID):
+    """Build an ``on_event(StageEvent)`` sink safe to call *concurrently*.
+
+    Executors stream progress from ``asyncio.gather`` fan-outs (one coroutine
+    per slide). Those coroutines all persist through the executor's single
+    ``AsyncSession`` — and an ``AsyncSession`` permits only one operation at a
+    time. Without serialization the concurrent ``flush``/``commit`` calls race,
+    SQLAlchemy raises ``InvalidRequestError: concurrent operations are not
+    permitted``, the whole job dies mid-flight, and (before this fix) the
+    client hung forever because the failure was never recorded.
+
+    The ``asyncio.Lock`` here makes every event write atomic: only one
+    ``on_event`` touches the session at a time, so the fan-out can emit freely.
+    We deliberately keep using the executor's own session (rather than opening
+    a second one) so the write topology — one connection, one transaction
+    lineage — is unchanged; commits stay ordered and the final result commit is
+    never contending with a stray event connection.
+    """
+    lock = asyncio.Lock()
+
+    async def on_event(event) -> None:
+        payload = {
+            "stage": event.stage,
+            "progress": event.progress,
+            "message_key": event.message_key,
+            "message_vars": event.message_vars,
+            "page_index": event.page_index,
+        }
+        etype = JobEventType.stage if event.stage else JobEventType.progress
+        async with lock:
+            await record_event(
+                session=session,
+                bus=bus,
+                job_id=job_id,
+                type=etype,
+                payload=payload,
+            )
+            await session.commit()
+
+    return on_event
 
 
 async def list_past_events(

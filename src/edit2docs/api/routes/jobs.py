@@ -23,7 +23,7 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from ...db.models import Job, JobKind, JobStatus
+from ...db.models import Job, JobEventType, JobKind, JobStatus
 from ...db.session import get_sessionmaker
 from ...services.jobs import (
     JobEventEnvelope,
@@ -32,6 +32,7 @@ from ...services.jobs import (
     get_default_bus,
     get_job,
     list_past_events,
+    record_event,
 )
 from ..errors import bilingual_detail
 from ..dependencies import (
@@ -361,14 +362,14 @@ async def _run_inline(job_id: uuid.UUID) -> None:
     the Job row and log, but we never raise back to the API caller (the
     request has already returned 202 by the time we start).
     """
+    from sqlalchemy import select
+
     from ...workers.executors.registry import EXECUTORS, ExecutionContext
 
     sessionmaker = get_sessionmaker()
     bus = get_default_bus()
 
     async with sessionmaker() as session:
-        from sqlalchemy import select
-
         job = (
             await session.execute(select(Job).where(Job.id == job_id))
         ).scalar_one_or_none()
@@ -377,21 +378,14 @@ async def _run_inline(job_id: uuid.UUID) -> None:
             return
 
         executor = EXECUTORS.get(job.kind)
-        if executor is None:
-            logger.error("inline runner: no executor for kind=%s", job.kind)
-            job.status = JobStatus.failed
-            job.error_message = f"no executor for kind={job.kind.value}"
-            await session.commit()
-            return
-
-        ctx = ExecutionContext(session=session, bus=bus, job=job)
         try:
+            if executor is None:
+                raise RuntimeError(f"no executor for kind={job.kind.value}")
+            ctx = ExecutionContext(session=session, bus=bus, job=job)
             await executor(ctx)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - fire-and-forget; never re-raise
             logger.exception("inline runner: job %s failed", job_id)
-            job.status = JobStatus.failed
-            job.error_message = str(exc)
-            await session.commit()
+            await _fail_job(session, bus, job_id, str(exc) or exc.__class__.__name__)
         finally:
             # Wake any SSE subscribers so they can drain and disconnect.
             # FakeJobBus exposes close(); RedisJobBus relies on connection
@@ -401,7 +395,56 @@ async def _run_inline(job_id: uuid.UUID) -> None:
                 try:
                     await close(job_id)
                 except Exception:
-                    logger.exception("inline runner: bus.close failed for job %s", job_id)
+                    logger.exception(
+                        "inline runner: bus.close failed for job %s", job_id
+                    )
+
+
+async def _fail_job(session, bus, job_id: uuid.UUID, message: str) -> None:
+    """Terminally mark *job_id* failed and emit a ``stage: failed`` event.
+
+    The executor's session may be mid-broken-transaction when we get here, so
+    we first ``rollback()`` to recover it, then persist ``failed`` plus a
+    terminal event. That terminal event is what lets every SSE subscriber —
+    the live tail AND a client that reconnects and replays history — see a
+    terminal signal and stop spinning. Without it a dead job looks, forever,
+    like it is still running.
+    """
+    from datetime import datetime, timezone
+
+    from sqlalchemy import select
+
+    try:
+        await session.rollback()
+    except Exception:  # pragma: no cover - connection already gone
+        logger.exception("inline runner: rollback failed for job %s", job_id)
+    try:
+        job = (
+            await session.execute(select(Job).where(Job.id == job_id))
+        ).scalar_one_or_none()
+        if job is None:
+            return
+        if job.status in (JobStatus.done, JobStatus.failed, JobStatus.cancelled):
+            return  # already terminal — don't clobber a real result
+        job.status = JobStatus.failed
+        job.error_message = (message or "job failed")[:2000]
+        job.finished_at = datetime.now(timezone.utc)
+        await record_event(
+            session=session,
+            bus=bus,
+            job_id=job_id,
+            type=JobEventType.stage,
+            payload={
+                "stage": "failed",
+                "progress": 1.0,
+                "message_key": "stages.failed",
+                "message_vars": {"error": (message or "")[:500]},
+                "page_index": None,
+            },
+        )
+        await session.commit()
+    except Exception:  # pragma: no cover - last resort; never raise from here
+        logger.exception("inline runner: could not mark job %s failed", job_id)
 
 
 @router.get(

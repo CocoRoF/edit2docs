@@ -15,11 +15,11 @@ from typing import Any
 
 from sqlalchemy import select
 
-from ...db.models import Asset, AssetKind, JobEventType, JobKind, JobStatus
+from ...db.models import Asset, AssetKind, JobKind, JobStatus
 from ...services.assets import upload_asset
-from ...services.jobs import record_event
+from ...services.jobs import make_event_sink
 from ...storage import get_default_storage
-from ...tools import ConvertRequest, StageEvent
+from ...tools import ConvertRequest
 from ...tools.edit_deck import ChatTurn, EditDeckRequest, edit_deck
 from .registry import ExecutionContext, register
 
@@ -82,21 +82,10 @@ async def run_edit_deck(ctx: ExecutionContext) -> None:
             )
         )
 
-    async def on_event(event: StageEvent) -> None:
-        await record_event(
-            session=session,
-            bus=bus,
-            job_id=job.id,
-            type=JobEventType.stage if event.stage else JobEventType.progress,
-            payload={
-                "stage": event.stage,
-                "progress": event.progress,
-                "message_key": event.message_key,
-                "message_vars": event.message_vars,
-                "page_index": event.page_index,
-            },
-        )
-        await session.commit()
+    # Progress events stream from an asyncio.gather fan-out (one coroutine per
+    # slide). make_event_sink serializes the concurrent writes on this session
+    # with a lock so they can't race — see make_event_sink for why.
+    on_event = make_event_sink(session, bus, job.id)
 
     from ...documents import doc_format_of
 
