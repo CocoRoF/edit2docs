@@ -1,6 +1,6 @@
 # edit2docs
 
-**AI 에이전트 네이티브 문서 엔진 — DOCX · XLSX · PPTX. English-first, 한국어는 완전한 1급 지원.**
+**AI 에이전트 네이티브 문서 엔진: DOCX, XLSX, PPTX를 Python 라이브러리, 에이전트 도구, MCP 서버, 호스팅 서비스로 생성하고 채팅으로 편집합니다. English-first, 한국어는 완전한 1급 지원.**
 
 [![PyPI](https://img.shields.io/pypi/v/edit2docs)](https://pypi.org/project/edit2docs/)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://pypi.org/project/edit2docs/)
@@ -8,98 +8,123 @@
 
 [English README](./README.md)
 
-`edit2docs`는 한 줄 의도로 완성된 오피스 문서를 생성하고, 기존 파일을 채팅으로
-편집합니다 — Word 보고서, Excel 워크북, PowerPoint 덱 전부 **네이티브 편집
-가능한 OOXML**로 (진짜 문단, 진짜 셀, 진짜 차트 — 스크린샷이 아니라).
-하나의 엔진, 네 가지 사용 방식: import해서 쓰거나, 에이전트에게 도구로 주거나,
-MCP 클라이언트에 연결하거나, 서비스로 띄우거나.
+## 무엇인가
+
+LLM 에이전트가 Word/Excel/PowerPoint 파일을 "편집"할 때는 보통 파일 전체를
+다시 생성하거나 그림으로 납작하게 만들어서 차트, 표, 서식, 수식이 사라집니다.
+`edit2docs`는 에이전트(또는 스크립트)에게 실제 OOXML 위에서 동작하는 작은
+**확장자 디스패치 동사** 묶음을 줍니다.
+
+* **생성**: 한 줄 의도로 완성 문서를 만들거나(LLM), 직접 쓴 스펙으로
+  결정적으로 만듭니다(키 불필요).
+* **편집**: 채팅으로(LLM) 혹은 정확한 주소로(결정적) 기존 파일을 고칩니다.
+  건드리지 않은 패키지 파트는 **바이트 단위로 동일**하게 남아, 차트·스파크라인·
+  이미지·캐시된 수식 값이 부수 피해를 입지 않습니다.
+* **조회·렌더**: 주소화된 아웃라인, 페이지 PNG/PDF/SVG, 마크다운.
+
+결과물은 항상 네이티브 편집 가능(진짜 문단, 셀, 차트)합니다. 하나의 엔진,
+네 가지 표면: Python 라이브러리, 에이전트 도구(function calling), 로컬 stdio
+MCP 서버, 호스팅 FastAPI 서비스.
+
+## 설치
+
+Python 3.12 이상이 필요합니다.
 
 ```bash
-pip install edit2docs              # 라이브러리 + 에이전트 도구 + 로컬 MCP
+pip install edit2docs              # 라이브러리 + 에이전트 도구 + 로컬 MCP 서버
 pip install "edit2docs[server]"    # + 호스팅 멀티테넌트 서비스
 ```
+
+선택 extras: `images`(Gemini/OpenAI 이미지 백엔드), `svg-fallback`(cairosvg),
+`dev`(테스트/린트, `server` 포함). 저장소 `main`이 PyPI보다 앞서 있을 수 있습니다
+([버전 이력](#버전-이력) 참고). 최신 main 설치:
+`pip install "edit2docs @ git+https://github.com/CocoRoF/edit2docs"`.
+
+## 빠른 시작
+
+결정적 동사는 API 키가 필요 없습니다. 아래 코드는 그대로 실행됩니다.
+
+```python
+from edit2docs import build_doc, analyze_doc, set_doc_text, render_doc
+
+build_doc({"slides": [
+    {"layout": "title", "title": "3분기 리뷰"},
+    {"layout": "content", "title": "핵심 성과", "bullets": ["매출 +12%", "이탈률 감소"]},
+]}, "deck.pptx", lang="ko-KR")
+
+info = analyze_doc("deck.pptx")      # 정확한 주소가 담긴 아웃라인
+title = next(t for t in info["slides"][1]["texts"] if t["text"] == "핵심 성과")
+# title == {"para": 0, "text": "핵심 성과", "shape_id": 2}
+
+r = set_doc_text("deck.pptx", [
+    {"slide": 1, "shape_id": title["shape_id"], "para": title["para"], "new_text": "주요 결과"},
+])
+print(r.path, r.applied)             # deck_edited.pptx 1  (입력 파일은 덮어쓰지 않음)
+
+render_doc("deck_edited.pptx", to="png", out_dir="pages")   # 페이지 PNG, LibreOffice 불필요
+```
+
+생성형 동사는 Anthropic 키(`api_key=` 또는 `ANTHROPIC_API_KEY`)가 필요합니다.
 
 ```python
 from edit2docs import generate_doc, edit_doc
 
 generate_doc("3분기 영업 실적 임원 보고", output="deck.pptx", lang="ko-KR")
 r = edit_doc("deck.pptx", "3번 슬라이드 제목을 더 단정적으로 바꿔줘", lang="ko-KR")
-print(r.reply)          # 편집기가 무엇을 바꿨는지 한국어로 설명
+print(r.reply)        # 편집기가 무엇을 바꿨는지 설명
+print(r.path)         # deck_edited.pptx (output=...으로 지정 가능)
 ```
 
----
+## 동사
 
-## 생태계
+파일 확장자가 엔진을 고릅니다. 아래는 모두 `edit2docs`의 라이브러리 함수입니다.
+`det`는 결정적·키 불필요, `LLM`은 BYOK입니다.
 
-| 저장소 | 설명 |
-|---|---|
-| **[edit2docs](https://github.com/CocoRoF/edit2docs)** (이 저장소) | 엔진: 라이브러리 · 에이전트 도구 · MCP · 호스팅 FastAPI 서비스 |
-| **[edit2docs-web](https://github.com/CocoRoF/edit2docs-web)** | 호스팅 서비스용 웹 스튜디오 — 업로드, 생성, 주소화 프리뷰 위 채팅 편집, 편집 영역 실시간 하이라이트, EN/KO UI. Next.js 15 / React 19 / Tailwind |
-| [ppt-master](https://github.com/hugohe3/ppt-master) | PPTX 코어의 upstream 프로젝트 (MIT) — v3.1까지 동기화됨 |
-| [edit2ppt](https://github.com/CocoRoF/edit2ppt) | 자매 프로젝트; 덱 파이프라인과 호스팅 서비스의 출처 |
-
-엔진 + 스튜디오의 프로덕션 배포 예시는
-[hr_blog2.0](https://github.com/CocoRoF/hr_blog2.0)의 compose 스택에 있습니다 —
-`edit2docs-server/`, `edit2docs-web/` 서비스 디렉토리가 nginx 뒤에 두 컨테이너를
-연결하는 실제 레퍼런스입니다.
-
----
-
-## 일곱 가지 동사
-
-모든 표면이 같은 일곱 개의 **확장자 디스패치** 동사를 노출합니다 — 파일
-확장자가 엔진을 고릅니다. 결정적 동사는 API 키가 필요 없고, 생성형 동사는
-BYOK(`api_key=...` 또는 `ANTHROPIC_API_KEY`)입니다.
-
-| 동사 | 하는 일 | LLM? |
+| 동사 | 하는 일 | |
 |---|---|---|
-| `generate_doc` | 의도 (+ 선택: 소스 문서 / PPTX 템플릿) → 완성 문서 | ✳ |
-| `edit_doc` | 자연어 편집 1턴; 건드리지 않은 내용은 **바이트 단위로 동일** 유지 | ✳ |
-| `preview_doc` | .pptx → 슬라이드별 SVG · .docx/.xlsx → 마크다운 | — |
-| `render_doc` | 모든 포맷 → 페이지 **PNG / PDF / SVG** — LibreOffice·서브프로세스 없음 | — |
-| `analyze_doc` | `set_doc_text` / `edit_chart`가 쓰는 **정확한 주소**가 담긴 구조 아웃라인 (`charts` 목록 포함) | — |
-| `set_doc_text` | 결정적 표적 편집 — **무손실** (차트 / 이미지 / 서식 / 수식 보존) | — |
-| `edit_chart` | 네이티브 차트의 **데이터·제목** 결정적 편집 — 차트와 임베디드 워크북을 함께 재작성 | — |
+| `build_doc(spec, output)` | 직접 쓴 스펙으로 문서 생성: 마크다운(docx), `{"sheets": [...]}`(xlsx), `{"slides": [...], "theme": {...}}`(pptx, 테마 덱 포함) | det |
+| `generate_doc(intent, *, output, ...)` | 의도(+ 선택: `sources`, PPTX `template`) → 디자인된 문서 | LLM |
+| `edit_doc(doc, instruction, ...)` | 자연어 편집 1턴; 건드리지 않은 내용은 바이트 단위로 동일 | LLM |
+| `analyze_doc(doc)` | 편집 동사가 쓰는 정확한 주소가 담긴 구조 아웃라인 + `charts` 목록 | det |
+| `set_doc_text(doc, edits, *, output=None)` | 표적 편집: docx 문단/표 셀, xlsx 셀/행/시트, pptx 도형 문단/표 셀, 네이티브 차트 제목/데이터(`chart` 인덱스가 있는 편집) | det |
+| `edit_chart(doc, edits)` / `list_charts(doc)` | 네이티브 차트의 데이터·제목 편집(차트 XML과 임베디드 워크북 동기화), docx/xlsx/pptx | det |
+| `arrange_doc(doc, ops, *, output=None)` | 구조: 슬라이드(pptx)·시트(xlsx) 통째로 복제 / 이동 / 삭제, 시트 이름 변경 | det |
+| `list_doc_parts(doc)` / `get_doc_xml(doc, part)` / `set_doc_xml(doc, part, ...)` | 패키지 파트 목록 또는 한 파트의 XML 읽기; 파트 패치·생성·삭제(색, 폰트, 위치 등 무엇이든) | det |
+| `preview_doc(doc, *, out_dir=None)` | pptx → 슬라이드별 SVG, docx/xlsx → 마크다운 | det |
+| `render_doc(doc, *, to="png", out_dir=None, dpi=144.0)` | `to` = `png` / `pdf` / `svg` / `md`; resvg + PyMuPDF, LibreOffice 불필요 | det |
+| `doc_guide(topic=None)` | 에이전트용 점진 공개 가이드(토픽: build, generate, edit, edit.text, edit.chart, arrange, edit.xml, recipes.slides, recipes.colors, render) | det |
 
-**무손실 편집.** 결정적 편집 동사들은
-[contextifier](https://github.com/CocoRoF/Contextifier)의 raw OOXML 레이어
-위에서 동작합니다: 편집이 수술적이고 건드리지 않은 패키지 파트는 바이트
-단위로 동일하게 유지되므로, 텍스트 편집 한 번이 차트·피벗·스파크라인·인라인
-이미지·수식 캐시를 파괴하는 일이 없습니다. PPTX 채팅 편집(`edit_doc`)도 재생성
-슬라이드의 **네이티브 차트/표를 그림으로 납작하게 만들지 않고 보존**합니다.
+비동기 변형: `async_generate_doc`, `async_edit_doc`. PPTX 전용 별칭(`generate_pptx`,
+`edit_pptx`, `preview_pptx`, `set_pptx_text`, `analyze_pptx`)도 있습니다.
 
----
+결과 객체: `GenerateResult(path, page_count, design_spec, warnings)`, `EditResult`
+(`.reply`, `.operations`, `.path`), `TextEditsResult(path, applied, results)`
+(편집별 `status`: `applied | stale | not_found | invalid`), `ArrangeResult`,
+`RenderResult(paths, page_count, format, to)`. 파생 파일을 쓰는 동사는 기본적으로
+`<stem>_edited.<ext>`로 저장합니다(`edit_chart`는 `_chart`, `arrange_doc`은
+`_arranged`). `output=`으로 지정하세요.
 
-## 1 · Python 라이브러리
-
-### 생성 — 출력 확장자가 엔진을 고릅니다
+### 생성
 
 ```python
-from edit2docs import generate_doc
-
 generate_doc("3분기 실적 보고서", output="report.docx", lang="ko-KR")
-generate_doc("분기별 매출 정리", output="sales.xlsx", sources=["raw.pdf"], lang="ko-KR")
-generate_doc("Q3 영업 결과 임원 보고", output="deck.pptx", lang="ko-KR",
+generate_doc("분기 매출 요약", output="sales.xlsx", sources=["raw.pdf"])
+generate_doc("3분기 영업 실적 임원 보고", output="deck.pptx",
              template="brand.pptx",          # 선택: 사용자 PPTX 템플릿
              deck_mode="template_restyle",   # "new" | "template_restyle" | "template_extend"
              pages=(8, 12))                  # 목표 페이지 범위 (pptx)
 ```
 
-전체 시그니처: `generate_doc(intent, *, output, api_key=None, sources=None,
-template=None, deck_mode="new", pages=(8, 12), lang="en-US", model=...)` →
-`GenerateResult(path, page_count, design_spec, warnings)`.
+`sources`는 PDF / DOCX / DOC / PPTX / XLSX / HTML / EPUB / IPYNB 경로를 받으며,
+각각 마크다운으로 변환되어 작성기의 참고 자료가 됩니다. 전체 시그니처:
+`generate_doc(intent, *, output, api_key=None, sources=None, template=None,
+deck_mode="new", pages=(8, 12), lang="en-US", model=...)`.
 
-`sources`는 PDF / DOCX / DOC / PPTX / XLSX / HTML / EPUB / IPYNB 경로를 받아
-마크다운으로 변환해 작성 LLM의 참고 자료로 전달합니다.
-
-### 편집 — 채팅 1턴, 나머지는 바이트 동일
+### 채팅 편집
 
 ```python
-from edit2docs import edit_doc
-
-r = edit_doc("report.docx", "진행 사항 섹션에 배포 완료 항목을 추가해줘", lang="ko-KR")
-print(r.reply)        # 편집기가 한 일 (요청 언어로)
-print(r.operations)   # 적용된 연산, 예: [{"action": "insert_after", ...}]
+r = edit_doc("report.docx", "진행 현황 섹션에 '배포 완료' 항목을 추가해줘", lang="ko-KR")
+print(r.reply, r.operations)
 
 r = edit_doc("deck.pptx", "이 문서 내용을 반영해서 3번 슬라이드를 고쳐줘",
              sources=["notes.pdf"], lang="ko-KR",
@@ -107,44 +132,58 @@ r = edit_doc("deck.pptx", "이 문서 내용을 반영해서 3번 슬라이드�
                            {"role": "assistant", "content": "..."}])
 ```
 
-플래너 LLM은 문서의 번호 붙은 아웃라인을 보고 **최소한의** 연산을 계획하고,
-결정적 엔진이 적용합니다 — 건드리지 않은 문단·셀·슬라이드는 바이트 그대로
-살아남습니다. 계획 생성에 실패하면 조용히 넘어가지 않고 응답에서 정직하게
-알립니다.
+플래너는 문서의 번호 매긴 아웃라인을 보고 최소한의 연산을 계획하며, 결정적
+엔진이 이를 적용합니다. 계획에 실패하면 조용히 아무 일도 안 하는 대신 그렇다고
+답합니다. 덱의 표적 편집은 실제 도형에 대해 제자리·바이트 보존 연산으로
+실행됩니다(25개 연산, 예: `set_text`, `set_runs`, `set_table_cell`, `insert_row`,
+`set_chart_data`, `add_slide`, `set_notes`, `set_hyperlink`, `set_theme_color`).
+필요한 새 슬라이드·전면 재디자인 턴은 슬라이드를 SVG로 재생성하는 경로로
+넘어갑니다. 연산 카탈로그는 코드로 조회할 수 있습니다(아래).
 
-### 검사 & 결정적 편집 (LLM 없음, 키 없음)
+### 결정적 편집
 
 ```python
-from edit2docs import analyze_doc, set_doc_text, preview_doc, render_doc
-
-info = analyze_doc("report.docx")
-# {"format": "docx", "outline": [
-#    {"para": 0, "style": "Heading 1", "text": "3분기 보고서"},
-#    {"table": 0, "row": 1, "col": 2, "text": "142"}, ...]}   ← 주소
-
 set_doc_text("report.docx", [
-    {"para": 0, "new_text": "3분기 최종 보고서"},              # docx: replace / insert_after / delete
+    {"action": "replace", "para": 0, "new_text": "3분기 최종 보고서"},
+    {"action": "insert_after", "para": 0, "markdown": "새 문단"},
+    {"action": "replace", "table": 0, "row": 1, "col": 2, "new_text": "142"},
+    {"action": "delete", "para": 5},
 ])
 set_doc_text("sales.xlsx", [
-    {"sheet": "매출", "cell": "B3", "value": 142},             # xlsx: set_cell / append_rows / add_sheet
+    {"action": "set_cell", "sheet": "Sales", "cell": "B3", "value": 142},
+    {"action": "append_rows", "sheet": "Sales", "rows": [["Q4", 160]]},
+    {"action": "add_sheet", "sheet": "Notes", "headers": ["a"], "rows": [["x"]]},
 ])
-set_doc_text("deck.pptx", [
-    {"slide": 0, "shape_id": 2, "para": 0, "new_text": "새 제목"},  # pptx
+set_doc_text("deck.pptx", [{"slide": 1, "shape_id": 5, "para": 0, "new_text": "새 제목"}])
+
+edit_chart("deck.pptx", [
+    {"chart": 0, "title": "3분기 매출"},
+    {"chart": 0, "categories": ["Q1", "Q2", "Q3"],
+     "series": [{"name": "매출", "values": [120, 135, 150]}]},
 ])
 
-preview_doc("deck.pptx", out_dir="previews")   # 슬라이드별 자립 SVG
-render_doc("report.docx", to="pdf")            # 페이지 PNG / PDF / 원본 SVG
-render_doc("deck.pptx", to="png", dpi=200)     # resvg 래스터 — LibreOffice 불필요
+arrange_doc("deck.pptx", [{"op": "duplicate", "target": 0}, {"op": "move", "target": 2, "to": 0}])
 ```
 
-생성형 동사의 비동기 버전: `async_generate_doc`, `async_edit_doc`
-(이미 실행 중인 이벤트 루프 안에서 사용).
+선택 `old_text` / `old_value` 가드는 오래된(stale) 편집을 거부합니다. 주소는
+`analyze_doc`에서 가져오세요. 전체 형식은 `doc_guide("edit.text")`로 확인합니다.
 
----
+PPTX 수술형 엔진은 직접 호출도 가능합니다.
 
-## 2 · 에이전트 도구 (function calling)
+```python
+from edit2docs.documents.pptx_engine import apply_pptx_edits, describe_ops, find_shapes
 
-같은 일곱 동사를 Anthropic tool-use 스키마 + 디스패처로:
+describe_ops()                                    # 기계가 읽는 연산 카탈로그 (연산별 주소 + 페이로드)
+find_shapes(pptx_bytes, text="매출")               # 텍스트/종류/이름/슬라이드로 도형 조회
+new_bytes, results = apply_pptx_edits(pptx_bytes, edits, dry_run=True)   # 쓰지 않고 검증
+# atomic=True -> 전부 적용 또는 전부 롤백
+```
+
+## 에이전트 도구 (function calling)
+
+`doc_guide`, `analyze_doc`, `render_doc`, `set_doc_text`, `arrange_doc`,
+`read_doc_xml`, `set_doc_xml`, `build_doc`, `generate_doc`, `edit_doc`가 도구
+스키마와 디스패처로 노출됩니다.
 
 ```python
 import anthropic
@@ -155,19 +194,22 @@ msg = client.messages.create(
     model="claude-sonnet-5",
     max_tokens=2048,
     tools=ANTHROPIC_TOOLS,
-    messages=[{"role": "user", "content": "deck.pptx 3번 슬라이드 제목 고쳐줘"}],
+    messages=[{"role": "user", "content": "deck.pptx의 3번 슬라이드 제목을 고쳐줘"}],
 )
 for block in msg.content:
     if block.type == "tool_use":
-        result = run_tool(block.name, block.input)   # 동기; run_tool_async도 있음
+        result = run_tool(block.name, block.input)   # run_tool_async도 있음
 ```
 
----
+`OPENAI_TOOLS`는 OpenAI 방식 function calling 형태입니다.
+`tool_specs(provider, extension="xlsx")`는 해당 파일 형식에 맞는 동사만(형식별로
+특화된 설명과 함께) 돌려주며, 확장자를 주지 않으면 전체 집합을 돌려줍니다. 이
+표면에서 차트 편집은 `set_doc_text`(`chart` 인덱스가 있는 편집)로 합니다.
 
-## 3 · 로컬 MCP 서버 (인프라 제로)
+## 로컬 MCP 서버 (인프라 불필요)
 
-`pip install edit2docs`에 로컬 파일 대상 stdio 서버 `edit2docs-mcp`가
-포함됩니다 (일곱 동사 전부):
+`pip install edit2docs`로 설치되는 `edit2docs-mcp` stdio 서버가 같은 열 개
+동사를 로컬 파일에 대해 노출합니다.
 
 ```jsonc
 // Claude Desktop / Claude Code / Cursor
@@ -181,150 +223,157 @@ for block in msg.content:
 }
 ```
 
-그다음 그냥 말하면 됩니다: *"~/decks/roadmap.pptx로 로드맵 10페이지 덱 만들고
-PDF로도 렌더링해줘"*.
+설치 없이: `uvx --from edit2docs edit2docs-mcp`. 클라이언트별 설정은
+[docs/mcp-clients.md](./docs/mcp-clients.md)를 보세요(그 문서는 호스팅 서버의
+도구 목록을 설명하며 로컬 서버와 다릅니다).
 
----
-
-## 4 · 호스팅 서비스
+## 호스팅 서비스
 
 ```bash
 pip install "edit2docs[server]"
-edit2docs serve                    # FastAPI :8000 — 스탠드얼론 모드
+edit2docs serve [--host H] [--port P] [--reload]    # FastAPI, 기본 포트 8000
 ```
 
-스탠드얼론 모드는 **외부 인프라가 전혀 필요 없습니다**: SQLite + 로컬 파일
-스토리지 + 인라인 잡 큐를 첫 부팅 때 자동 구성합니다. 규모가 커지면 환경변수로
-Postgres / Redis / S3를 붙이세요.
+단독 모드는 외부 인프라가 필요 없습니다: `EDIT2DOCS_DATA_DIR` 아래 SQLite + 로컬
+파일시스템 저장소 + 인라인 작업 큐. Postgres, Redis(arq 워커 큐), S3 호환 저장소는
+환경 변수로 켭니다.
 
-| REST 엔드포인트 | 용도 |
+| 엔드포인트 | 용도 |
 |---|---|
-| `POST /v1/assets` · `GET /v1/assets/{id}` | 문서 업로드 / 조회 (200 MB 제한) |
-| `POST /v1/jobs/generate-deck` · `/v1/jobs/edit-deck` | 생성형 잡 큐잉 (3개 포맷 전부) |
-| `GET /v1/jobs/{id}` · `GET /v1/jobs/{id}/events` | 잡 상태 · **SSE 진행 스트림** (스테이지 + 주소화 타겟이 담긴 연산별 라이브 편집 이벤트) |
-| `POST /v1/preview` | pptx → 슬라이드별 SVG · docx/xlsx → **주소화 HTML** |
+| `POST /v1/assets`, `GET/DELETE /v1/assets/{id}` | 문서 업로드 / 조회 / 삭제 (기본 200 MB 상한) |
+| `POST /v1/jobs/generate-deck` | 생성 작업 큐잉; `output_format` = `pptx` / `docx` / `xlsx` |
+| `POST /v1/jobs/edit-deck` | 채팅 편집 작업 큐잉 |
+| `GET /v1/jobs/{id}`, `GET /v1/jobs/{id}/events` | 상태; SSE 진행 스트림(단계 + 주소화된 대상이 있는 연산별 실시간 편집 이벤트) |
+| `POST /v1/preview` | pptx → 슬라이드별 SVG, docx/xlsx → 주소화된 HTML(`data-e2d-*`) |
 | `POST /v1/text-edits` | 결정적 표적 편집 |
-| `GET /health` | 생존 확인 + 모드 리포트 |
-| `/mcp` · `/mcp-sse` | 같은 동사들의 MCP 노출 (Streamable HTTP / SSE) |
+| `GET /v1/models` | 실시간 모델 목록(호출자의 키로 Anthropic Models API 중계, 키 없으면 내장 목록) |
+| `GET /health` | 생존 확인 및 모드 보고 |
+| `/mcp`, `/mcp-sse` | Streamable HTTP / SSE 위의 MCP (덱 작업 중심 도구: `generate_deck`, `edit_deck`, `upload_source`, `request_upload_url`, `get_asset`, `download_url`, `list_templates`, `list_voices`, `hello`) |
 
-Anthropic 키는 **요청별 BYOK**(`X-Anthropic-API-Key` 헤더) — 절대 저장하지
-않습니다. 에러는 이중어로: `message`는 요청의 `Accept-Language`를 따르고
-`message_en` / `message_ko`가 항상 함께 옵니다.
+Anthropic 키는 요청마다 BYOK입니다(`X-Anthropic-API-Key` 헤더). 오류는 이중 언어:
+`message`가 `Accept-Language`를 따르고 영어/한국어 변형도 함께 제공됩니다.
 
-주요 환경변수 (접두사 `EDIT2DOCS_`):
+### 설정
+
+환경 변수, 접두사 `EDIT2DOCS_` (`src/edit2docs/config.py` 참고):
 
 | 변수 | 기본값 | 비고 |
 |---|---|---|
-| `EDIT2DOCS_DEFAULT_LANG` | `en-US` | `ko-KR`로 설정하면 배포 전체가 한국어 기본 |
-| `EDIT2DOCS_DATA_DIR` | `/data/edit2docs` | 스탠드얼론 SQLite + 파일 스토리지 루트 |
-| `EDIT2DOCS_DATABASE_URL` | (sqlite) | 예: `postgresql+asyncpg://...` |
-| `EDIT2DOCS_REDIS_URL` | (인라인 큐) | arq 워커 큐 활성화 |
-| `EDIT2DOCS_S3_*` | (로컬 fs) | S3 호환 스토리지 endpoint / bucket / 키 |
-| `EDIT2DOCS_AUTH_DEV_API_KEY` | (익명) | 소규모 배포용 단일 bearer 토큰 |
-| `EDIT2DOCS_MAX_UPLOAD_SIZE_BYTES` | 200 MB | 리버스 프록시 설정과 맞추세요 |
-| `EDIT2DOCS_MODEL_{PLANNER,WRITER,STRATEGIST,EXECUTOR}` | (요청 모델) | 역할별 모델 오버라이드 — 플래너/작성기 턴을 더 작은 모델로 (호출부 무변경) |
-| `EDIT2DOCS_STRATEGIST_SOURCE_CHAR_CAP` | 60000 | 덱 전략가에 투입되는 소스 문서당 상한 (0 = 무제한) |
+| `EDIT2DOCS_DEFAULT_LANG` | `en-US` | `ko-KR`로 두면 배포가 한국어 기본 |
+| `EDIT2DOCS_HOST` / `EDIT2DOCS_PORT` | `0.0.0.0` / `8000` | `serve` 플래그로 덮어쓰기 가능 |
+| `EDIT2DOCS_DATA_DIR` | `/data/edit2docs` | SQLite + 파일 저장소 루트 |
+| `EDIT2DOCS_DATABASE_URL` | 데이터 디렉터리 아래 SQLite | 예: `postgresql+asyncpg://...` |
+| `EDIT2DOCS_REDIS_URL` | 미설정(인라인 큐) | arq 워커 큐 활성화 |
+| `EDIT2DOCS_S3_ENDPOINT_URL` + `EDIT2DOCS_S3_BUCKET` | 미설정(로컬 fs) | `S3_REGION`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_PUBLIC_BASE_URL`과 함께 |
+| `EDIT2DOCS_RAW_SIGNING_KEY` | 시작할 때마다 무작위 | 운영에서는 지정해야 서명된 로컬 URL이 재시작 후에도 유효 |
+| `EDIT2DOCS_AUTH_DEV_API_KEY` | 미설정(익명) | 소규모 배포용 단일 bearer 토큰 |
+| `EDIT2DOCS_MAX_UPLOAD_SIZE_BYTES` | 200 MB | 리버스 프록시와 맞추세요 |
+| `EDIT2DOCS_MODEL_{PLANNER,WRITER,STRATEGIST,EXECUTOR}` | 요청 모델 | 역할별 모델 덮어쓰기 |
+| `EDIT2DOCS_STRATEGIST_SOURCE_CHAR_CAP` | `60000` | 덱 전략가에 넣는 소스별 상한 (0 = 무제한) |
+
+이미지 생성 백엔드(`images` extra)는 `IMAGE_BACKEND`, `OPENAI_API_KEY`,
+`GEMINI_API_KEY` 같은 제공자 변수를 읽습니다. `.env.example`을 참고하세요.
 
 ### 웹 스튜디오
 
-[**edit2docs-web**](https://github.com/CocoRoF/edit2docs-web)은 이 서비스의
-공식 프론트엔드입니다: 드래그&드롭 업로드, 스테이지별 SSE 진행 표시 생성,
-그리고 채팅이 문서를 고치는 동안 캔버스가 **각 연산이 건드리는 문단/셀/
-슬라이드를 정확히 하이라이트**하는 공동 편집 스튜디오 (프리뷰 HTML의
-`data-e2d-*` 주소, PPTX의 `data-e2p-*` 주소 사용). English-first UI + KO/EN
-토글. `EDIT2DOCS_SERVER_INTERNAL_URL` + `EDIT2DOCS_SERVER_API_KEY`로 엔진에
-연결합니다.
+[**edit2docs-web**](https://github.com/CocoRoF/edit2docs-web)은 공식 프론트엔드입니다:
+업로드, 단계별 SSE 진행이 있는 생성, 각 연산이 건드리는 문단 / 셀 / 슬라이드를
+캔버스에 하이라이트하는 채팅 편집 스튜디오. 엔진 연결은
+`EDIT2DOCS_SERVER_INTERNAL_URL`과 `EDIT2DOCS_SERVER_API_KEY`로 합니다.
 
----
+## 포맷별 동작
 
-## 포맷별 동작 방식
+* **DOCX**: 작성 LLM이 제약된 마크다운을 내고, 결정적 python-docx 렌더러가 파일을
+  만듭니다. 편집은 문단/표 셀 주소 기반입니다. 프리뷰는 주소화된 네이티브 HTML
+  (`data-e2d-para`, `data-e2d-table`, `data-e2d-cell`)입니다.
+* **XLSX**: 디자이너 LLM이 YAML 시트 스펙을 내고 openpyxl이 렌더합니다. 편집은
+  stale 가드가 있는 `set_cell` / `append_rows` / `add_sheet`입니다. 프리뷰는
+  `data-e2d-cell="B3"` 주소와 캐시된 수식 값이 있는 그리드입니다.
+* **PPTX**: strategist → 페이지별 SVG → 네이티브 DrawingML, 사용자 템플릿
+  restyle/extend, 선택적 Edge-TTS 내레이션. 채팅 편집은 위에서 설명한 제자리
+  수술형 엔진을 씁니다.
 
-* **DOCX** — 작성 LLM이 제약된 마크다운 문서를 출력하면 결정적 렌더러
-  (python-docx)가 스타일 잡힌 Word로 변환. 편집은 문단 주소 연산(`replace` /
-  `insert_after` / `delete`, 표 셀은 `table`/`row`/`col`). 호스팅 프리뷰는
-  네이티브 *주소화* HTML — 모든 문단에 `data-e2d-para`, 모든 셀에
-  `data-e2d-cell`(아웃라인·라이브 편집 스트림과 같은 주소) + 병합셀, 정렬,
-  색상, 이미지, 각주, 페이지 나눔.
-* **XLSX** — 설계 LLM이 YAML *시트 스펙*(시트/헤더/행/숫자서식, 수식 허용)을
-  출력하면 openpyxl이 스타일 잡힌 시트로 렌더링. 편집은 `set_cell` /
-  `append_rows` / `add_sheet` (+ 낡은 값 가드). 호스팅 프리뷰는 스프레드시트
-  그리드(열 문자, 행 번호, 병합 범위, 수식 캐시값) — 모든 셀에
-  `data-e2d-cell="B3"` (정확히 `set_cell`이 받는 주소).
-* **PPTX** — 완전한 다단계 파이프라인: 전략가 → 페이지별 SVG → 네이티브
-  DrawingML, 사용자 PPTX 템플릿(restyle/extend), 슬라이드 재구성 채팅 편집,
-  표 셀 포함 문단 단위 텍스트 편집, 선택적 Edge-TTS 나레이션. 내보낸 텍스트는
-  **문단 병합** 상태(줄 단위 박스가 아니라 진짜 문단으로 편집됨).
+무손실 편집은 [contextifier](https://github.com/CocoRoF/Contextifier)의 raw OOXML
+레이어(`contextifier>=0.8.0`) 위에 있습니다: 편집이 건드린 파트만 다시 씁니다.
 
-### 네이티브 차트 & 표 (PPTX)
+### 네이티브 차트와 표 (PPTX)
 
-`data-pptx-native="chart|table"` 마커가 붙은 SVG 그룹은 그려진 도형이 아니라
-**진짜 편집 가능한 PowerPoint 객체**로 내보내집니다 — 임베디드 Excel 워크북이
-달린 차트 XML 파트(PowerPoint에서 더블클릭해 데이터 편집 가능) 또는 네이티브
-`<a:tbl>` 표:
+`data-pptx-native="chart|table"`로 표시한 SVG 그룹은 실제 PowerPoint 차트(차트 파트 +
+임베디드 워크북) 또는 네이티브 `<a:tbl>` 표로 내보내집니다.
 
 ```xml
 <g id="sales_chart" data-pptx-native="chart">
   <metadata data-pptx-native="chart">
-    { "name": "sales_chart",
-      "x": 125, "y": 141, "width": 1000, "height": 440,
-      "type": "bar",
-      "categories": ["Q1", "Q2", "Q3"],
-      "series": [{ "name": "매출", "values": [120, 135, 150] }] }
+    { "name": "sales_chart", "x": 125, "y": 141, "width": 1000, "height": 440,
+      "type": "bar", "categories": ["Q1", "Q2", "Q3"],
+      "series": [{ "name": "Sales", "values": [120, 135, 150] }] }
   </metadata>
-  <!-- 폴백 도형 — 네이티브 내보내기 꺼짐 시 사용 -->
+  <!-- 네이티브 내보내기를 끄면 쓰이는 대체 도형 -->
 </g>
 ```
 
-`ExportRequest(native_objects=True)`로 opt-in (`tools/export.py`). 지원 차트:
-bar / column / line / area / pie / doughnut / of-pie / radar (클래식),
-scatter / bubble (XY), box-whisker / funnel / histogram / pareto / sunburst /
-treemap / waterfall (chartEx). 품질 체커가 내보내기 전에 마커 페이로드를
-검증합니다.
-
-모든 LLM 플래너는 같은 계약을 따릅니다: 펜스된 `reply` + `edit_plan` 블록,
-형식 리마인더와 함께 1회 재시도, 계획 실패 시 조용한 no-op 대신 정직한 응답.
-
----
+`ExportRequest(native_objects=True)`로 켭니다(`tools/export.py`).
 
 ## 언어
 
-기본은 영어(`lang="en-US"`)지만 **한국어는 뒷전이 아니라 1급 시민**입니다 —
-한글 인지 텍스트 폭 계산, 실제 문자 스크립트를 감지한 런 단위 OOXML `lang`
-속성, 한국어 폰트 스택(Pretendard/맑은고딕), 완전한 한국어 메시지 카탈로그,
-로컬라이즈된 채팅 응답과 라이브 편집 라벨. 호출 단위는 `lang="ko-KR"`,
-요청 단위는 `Accept-Language: ko-KR`, 배포 전체는
-`EDIT2DOCS_DEFAULT_LANG=ko-KR`로 전환합니다. zh-CN / zh-TW / ja-JP도 같은
-스크립트 감지·폰트 스택 처리를 받습니다.
+기본은 영어(`lang="en-US"`)이고, 한국어는 1급 지원입니다: 한글 폭 인식, 실제
+문자에서 감지한 런별 OOXML `lang`, 한국어 폰트 스택, 완전한 메시지 카탈로그,
+현지화된 응답. 호출별(`lang="ko-KR"`), 요청별(`Accept-Language`), 배포별
+(`EDIT2DOCS_DEFAULT_LANG=ko-KR`)로 전환합니다. zh-CN / zh-TW / ja-JP도 같은
+문자 감지와 폰트 스택 처리를 받습니다.
 
----
+## 생태계
+
+| 저장소 | 설명 |
+|---|---|
+| [edit2docs-web](https://github.com/CocoRoF/edit2docs-web) | 호스팅 서비스용 웹 스튜디오 (Next.js) |
+| [contextifier](https://github.com/CocoRoF/Contextifier) | 무손실 편집에 쓰는 raw OOXML 레이어 |
+| [ppt-master](https://github.com/hugohe3/ppt-master) | `src/edit2docs/core/` PPTX 코어의 upstream (MIT) |
+| [edit2ppt](https://github.com/CocoRoF/edit2ppt) | 자매 프로젝트; 덱 파이프라인의 출처 |
+
+## 프로젝트 구조
+
+`src/edit2docs/`: `simple.py`(라이브러리 동사) · `agent_tools.py`,
+`agent_guide.py`, `tool_matrix.py`(에이전트 표면) · `documents/`(docx/xlsx/pptx
+엔진, arrange, 차트·XML 편집) · `tools/`(LLM 파이프라인: 생성, 편집, 프리뷰,
+내보내기) · `core/`(ppt-master 파생 덱 엔진) · `mcp/`(로컬 stdio + 호스팅 서버) ·
+`api/`(FastAPI) · `render/`, `i18n/`, `llm/`, `db/`, `storage/`, `workers/`,
+`services/`. 설계 노트는 [docs/](./docs/)와
+[PPTX_EDITING_UPGRADE_PLAN.md](./PPTX_EDITING_UPGRADE_PLAN.md)에 있습니다.
 
 ## 개발
 
 ```bash
 git clone https://github.com/CocoRoF/edit2docs && cd edit2docs
 uv venv .venv && uv pip install -e ".[server,dev]"
-.venv/bin/python -m pytest tests/          # 769개 테스트
-.venv/bin/python -m ruff check src/edit2docs --exclude src/edit2docs/core
+.venv/bin/python -m pytest tests/          # 0.19.0 기준 949 passed, 1 skipped
+.venv/bin/python -m ruff check src/edit2docs
 ```
+
+`scripts/lint_ascii_paths.py`가 ASCII 전용 경로를 강제합니다(테스트에서 실행).
 
 ## 버전 이력
 
-| 버전 | 주요 내용 |
+저장소 현재 버전: **0.19.0**. 2026-10-01 기준 PyPI에는 0.16.1까지 있고,
+0.17.0~0.19.0은 `main`에만 있습니다.
+
+| 버전 | 요약 |
 |---|---|
-| **v0.7.0** | upstream 동기화 (ppt-master v2.7 → v3.1, 3웨이브): **네이티브 차트/표 내보내기**, 문단 병합 편집성, PowerPoint 복구 프롬프트 해결, 체커 강화 · **English-first 전환** (한국어 완전 지원) |
-| v0.5–0.6 | `render_doc` — 3개 포맷 전부 PNG/PDF/SVG 네이티브 페이지 렌더링 (resvg + PyMuPDF, LibreOffice 불필요) |
-| v0.4.0 | 주소화 네이티브 프리뷰 (`data-e2d-*`) — 프리뷰·아웃라인·에디터가 하나의 주소 체계 공유 |
-| v0.3.0 | 라이브 편집 스트리밍 — 주소화 타겟이 담긴 연산별 SSE 이벤트 |
-| v0.2.x | 멀티포맷 호스팅 API + 전 포맷 하드닝 |
-| **v0.9.0** | **토큰 최적화** — 프롬프트 캐시 재구성(편집 재시도가 캐시 프리픽스를 ~10× 저렴하게 읽음, 실행기 spec_lock 페이지당 재전송 제거), 팬아웃 캐시 웜업, 무제한 입력 캡(전략가 소스·편집 아웃라인 윈도잉), 재시도 심각도 티어링, 역할별 모델 티어링, 스트리밍, 캐시 회계·스테이지별 비용 |
-| v0.8.0 | **무손실 편집** — contextifier raw OOXML 레이어 위: set_doc_text/edit_doc가 차트·이미지·스파크라인·서식·수식 캐시를 파괴하지 않음; PPTX 채팅편집 네이티브 차트/표 보존; 신규 **`edit_chart`** 동사(데이터+제목, 임베디드 워크북 동기화) |
-| v0.1.0 | 멀티포맷 엔진: DOCX/XLSX/PPTX 핵심 동사 |
+| 0.19.0 | 레이아웃 인식 네이티브 `add_slide`; 연산 `set_notes`, `set_bullet`, `set_hyperlink`, `set_z_order`, `set_legend`, `set_series_color`, `set_theme_color`, `set_theme_font` (PPTX 연산 25개); `contextifier>=0.8.0` 필요 |
+| 0.18.0 | 자기 서술형 PPTX 엔진: `OP_CATALOG` / `describe_ops()`, `dry_run`, `atomic`, `find_shapes`; 연산 `set_runs`, `add_textbox`, `delete_shape`, `duplicate_shape`, `insert_column`, `delete_column`, `merge_cells` |
+| 0.17.x | 구조적 PPTX 편집: 표적 턴에서 슬라이드 전체 SVG 재생성 대신 주소화된 바이트 보존 제자리 편집 |
+| 0.16.x | 확장자 한정 도구(`tool_specs(extension=...)`, `tool_matrix`); `GET /v1/models`; 슬라이드 편집 재시도·실패 작업 처리 보강 |
+| 0.15.1 | `arrange_doc` (0.15.0은 구현이 빠진 채 배포됨; 0.15.1 이상 사용) |
+| 0.14.1 | `mcp<2.0` 상한 (2.0이 `mcp.server.fastmcp`를 제거) |
+| 0.10-0.14 | `build_doc`, `read_doc_xml` / `set_doc_xml`, 계층형 `doc_guide`, 테마 덱 |
+| 0.9.0 | 토큰 최적화: 프롬프트 캐시 재구성, 입력 상한, 역할별 모델 티어링 |
+| 0.8.0 | contextifier 기반 무손실 편집; `edit_chart` |
+| 0.7.x | ppt-master v3.1 동기화, 네이티브 차트/표 내보내기, English-first, Apache-2.0 전환(0.7.1) |
+| 0.1-0.6 | 멀티포맷 엔진, 호스팅 API, 실시간 편집 스트리밍, 주소화 프리뷰, `render_doc` |
 
 ## 라이선스
 
-[Apache-2.0](./LICENSE). `src/edit2docs/core/`의 PPTX 코어는
-[ppt-master](https://github.com/hugohe3/ppt-master)(MIT, © Hugo He)에서
-[edit2ppt](https://github.com/CocoRoF/edit2ppt)를 거쳐 파생됐으며 upstream
-v3.1까지 동기화 유지 중입니다. 해당 부분의 원본 MIT 조항은
-[NOTICE](./NOTICE)와 [LICENSE.ppt-master.MIT](./LICENSE.ppt-master.MIT)에
-보존되어 있습니다.
+[Apache License 2.0](./LICENSE). `src/edit2docs/core/`의 PPTX 코어는
+[ppt-master](https://github.com/hugohe3/ppt-master)(MIT, Copyright (c) Hugo He)에서
+파생되었으며, 해당 MIT 조건은 [NOTICE](./NOTICE)와
+[LICENSE.ppt-master.MIT](./LICENSE.ppt-master.MIT)에 보존되어 있습니다.
